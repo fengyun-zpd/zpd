@@ -1,0 +1,25 @@
+# 操作系统与编辑器杂项
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+
+# 后续代码/数据占位（当前仓库仅含设计文档）
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+.idea/
+.vscode/
+*.iml
