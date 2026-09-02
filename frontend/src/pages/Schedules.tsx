@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, newIdemKey } from "../api/client";
-import { formatBoolean, shortId } from "../ui/format";
+import { formatBoolean, formatRole, shortId } from "../ui/format";
 
 interface ScheduleDto {
   schedule_id: string;
@@ -11,10 +11,12 @@ interface ScheduleDto {
   default_window: number;
 }
 
-export function Schedules() {
+export function Schedules({ roles }: { roles: string[] }) {
   const [schedules, setSchedules] = useState<ScheduleDto[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+
+  const canRun = roles.includes("admin");
 
   const load = useCallback(() => {
     api
@@ -43,7 +45,12 @@ export function Schedules() {
   return (
     <div className="card">
       <h2>定时任务</h2>
-      <p className="hint">Celery Beat 每 30 秒读取数据库配置并分发到期扫描（V1 最低周期 1 分钟）。</p>
+      <p className="hint">
+        Celery Beat 每 30 秒读取数据库配置并分发到期扫描（V1 最低周期 1 分钟）。
+        {canRun
+          ? " 当前用户（管理员）可执行“立即执行”。"
+          : ` 当前用户（${roles.map(formatRole).join("/") || "未分配角色"}）只能查看；“立即执行”仅管理员可用。`}
+      </p>
       {error && <p className="error">{error}</p>}
       {notice && <p className="hint">{notice}</p>}
       <table>
@@ -73,7 +80,14 @@ export function Schedules() {
               <td>{s.default_window} 天</td>
               <td>{formatBoolean(s.enabled)}</td>
               <td>
-                <button onClick={() => runNow(s.schedule_id)}>立即执行</button>
+                <button
+                  onClick={() => runNow(s.schedule_id)}
+                  disabled={!canRun}
+                  title={canRun ? "立即执行一次扫描（后台异步）" : "仅管理员可执行“立即执行”；操作员为只读查看"}
+                >
+                  立即执行
+                </button>
+                {!canRun && <span className="hint"> · 仅管理员</span>}
               </td>
             </tr>
           ))}

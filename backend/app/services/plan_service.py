@@ -836,6 +836,11 @@ def create_purchase_orders(
     if not approved:
         raise ValidationError("计划没有已批准的有效明细")
 
+    # 全零计划不得建单（需求 5.3 订货量为 0 时不建单）：稳定校验错误，无任何副作用
+    purchasable = [line for line in approved if line.order_qty > 0]
+    if not purchasable:
+        raise ValidationError("该计划无需建单：所有已批准明细的建议数量均为 0（净需求已由当前库存或在途满足）")
+
     guard = IdempotencyGuard(
         session,
         principal_id=actor_id,
@@ -849,6 +854,13 @@ def create_purchase_orders(
         return begin.response.get("purchase_order_ids", [])
     if begin.action == "replay_failure":
         replay_failure(begin)
+
+    # 已建单计划不得重复建单（放在幂等重放之后：同键重放仍返回原结果；新键直接拒绝）
+    existing_po = session.scalar(select(PurchaseOrder).where(PurchaseOrder.plan_id == plan_id))
+    if existing_po is not None:
+        raise InvalidStateTransitionError(
+            f"该计划已创建过采购单（{existing_po.id}），不允许重复建单；请查看原采购单状态"
+        )
 
     acquire_warehouse_product_locks(session, [(line.warehouse_id, line.product_id) for line in approved])
 
@@ -864,10 +876,7 @@ def create_purchase_orders(
         )
 
     by_supplier: dict[str, list[PlanLine]] = {}
-    for line in approved:
-        # 净需求为 0 的明细不产生收货义务：不进入采购单（需求 5.3 订货量为 0 时不建单）
-        if line.order_qty <= 0:
-            continue
+    for line in purchasable:
         by_supplier.setdefault(line.supplier_id or "", []).append(line)
 
     created: list[PurchaseOrder] = []

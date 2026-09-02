@@ -35,6 +35,31 @@ _INTENT_REPLENISH = re.compile(r"补货|采购|进货|订货|备货|库存不足
 _INTENT_QUERY = re.compile(r"查|看|多少|库存量|在途|需求|历史|剩余")
 _INTENT_EXPLAIN = re.compile(r"为什么|解释|依据|原因|怎么算|公式|说明")
 
+# 预算/成本约束：V2 才参与金额阈值审批（ADR 001 / 架构 V2 行）；V1 中识别但绝不当作必填参数
+_BUDGET_RE = re.compile(r"预算|成本|金额|花费|费用|上限|不超过.{0,6}(元|块)|控制在.{0,6}内|万元")
+
+# 缺参业务标签（对外自然语言，禁止在回复中暴露内部字段名）
+_MISSING_LABEL = {
+    "warehouse": "仓库",
+    "product": "SKU 或商品分类",
+    "requested_window": "规划周期（7/14/30 天）",
+}
+
+_ALLOWED_MISSING = ("warehouse", "product", "requested_window")
+
+# 可直接复用的自然语言句式（前端示例按钮与此一致）
+REPLENISH_EXAMPLE = "帮我检查华东仓未来14天需要补货的紧固件"
+BUDGET_NOTE = "预算/成本约束暂不参与 V1 补货计算，无需提供（金额阈值审批属于后续版本）。"
+
+
+def normalize_missing(missing: list[str]) -> list[str]:
+    """missing 只保留业务白名单字段；LLM 返回的未知键（如 budget）一律丢弃。"""
+    return [m for m in missing if m in _ALLOWED_MISSING]
+
+
+def missing_label(missing: list[str]) -> str:
+    return "、".join(_MISSING_LABEL[m] for m in normalize_missing(missing))
+
 
 @dataclass
 class ParsedIntent:
@@ -42,6 +67,7 @@ class ParsedIntent:
     params: dict = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
     clarification: str | None = None
+    budget_note: bool = False  # 用户提到预算/成本约束（V1 不参与计算，仅提示说明）
 
 
 def classify_intent(text: str) -> str:
@@ -64,11 +90,12 @@ def _match_window(text: str) -> int | None:
 
 def parse_params(text: str, session: Session) -> ParsedIntent:
     intent = classify_intent(text)
+    budget_note = bool(_BUDGET_RE.search(text))
     params: dict = {}
     missing: list[str] = []
 
     if intent != "replenish":
-        return ParsedIntent(intent=intent, params=params, missing=missing)
+        return ParsedIntent(intent=intent, params=params, missing=missing, budget_note=budget_note)
 
     # 仓库
     warehouse_id = None
@@ -115,14 +142,17 @@ def parse_params(text: str, session: Session) -> ParsedIntent:
 
     clarification = None
     if missing:
-        label = {
-            "warehouse": "仓库",
-            "product": "SKU 或商品范围",
-            "requested_window": "规划窗口（7/14/30 天）",
-        }
-        clarification = "缺少必要参数：" + "、".join(label[m] for m in missing) + "，请补充。"
+        clarification = "缺少必要参数：" + "、".join(_MISSING_LABEL[m] for m in missing) + "，请补充。"
+        if budget_note:
+            clarification += BUDGET_NOTE
 
-    return ParsedIntent(intent=intent, params=params, missing=missing, clarification=clarification)
+    return ParsedIntent(
+        intent=intent,
+        params=params,
+        missing=normalize_missing(missing),
+        clarification=clarification,
+        budget_note=budget_note,
+    )
 
 
 def build_explanation(plan_id: str, draft: dict | None) -> str:

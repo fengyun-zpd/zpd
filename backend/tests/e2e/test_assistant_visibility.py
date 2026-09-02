@@ -40,7 +40,7 @@ def test_assistant_clarifies_missing_params(browser):
     page = browser.new_page()
     try:
         page.goto(f"{BASE_URL}/", wait_until="networkidle")
-        _send_and_wait(page, "帮我补货", "缺少必要参数")
+        _send_and_wait(page, "帮我补货", "还需要补充")
         # 徽标：需要补充参数
         page.wait_for_selector(".badge.status-pending_approval", timeout=15000)
         # 缺失字段详情
@@ -93,7 +93,7 @@ def test_assistant_shows_mode_badge(browser):
     page = browser.new_page()
     try:
         page.goto(f"{BASE_URL}/", wait_until="networkidle")
-        _send_and_wait(page, "帮我补货", "缺少必要参数")
+        _send_and_wait(page, "帮我补货", "还需要补充")
         badge = page.locator(".badge.status-offline, .badge.status-llm")
         assert badge.count() >= 1
         print("对话模式徽标 OK")

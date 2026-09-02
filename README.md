@@ -158,7 +158,8 @@ docker compose -f docker-compose.iso.yml down
 
 **验证结果（2026-09-02 发布基线实测，本机 Windows PowerShell + WSL）**：
 
-- 后端非 E2E 测试（unit/property/integration/agent，不含浏览器）：**129 passed, 8 deselected**。
+- 后端非 E2E 测试（unit/property/integration/agent，不含浏览器）：**136 passed, 8 deselected**
+  （V1 收口后：原 129 项 + 缺参澄清文案/预算不参与/全零计划建单拒绝/重复建单拒绝等 7 项新增）。
 - 隔离环境 E2E 测试（Playwright，独立 compose `docker-compose.iso.yml`，前端 :13000）：**8 passed**
   （闭环 助手→审批→建单→下达→分批收货→关闭、助手缺参/防重/模式徽标、数据页库存/供应商/告警/工作台详情）。
 - 安全不变量专项检查：越权操作、重复有效建议、重复采购、重复入库、`order_unknown` 盲目重试、非法状态迁移、幂等键异载荷副作用 **7 项全部为 0**。
@@ -179,7 +180,7 @@ docker compose -f docker-compose.iso.yml down
   密钥泄露扫描（只报文件名，不输出匹配内容），全部在无 LLM/Langfuse 凭证环境执行。
   注：workflow 文件已按上述修复更新，本轮以本地等价流程验证通过；
   GitHub Actions 云端成功运行需要 push 后由 Actions 执行（仓库当前未提交，无云端运行记录）。
-- 收口修复：①`node_classify` 会话块外使用 session 的连接泄漏；②LLM 意图分类提示词与分类名展开；③Docker Compose 补 db 初始化 pgvector 扩展脚本；④seed 默认只在空库初始化、显式 `--reset` 才重建（保证 api 可重复启动不清数据）；⑤Dockerfile pip 镜像源/超时与层缓存顺序；⑥pgvector 向量检索改用 ORM（`Vector.cosine_distance`）修复 raw SQL 绑定失败；⑦e2e 采购单下拉按可读状态文本选中（容器环境残留历史 PO 时不再用 index 定位）+ 前置脚本检查种子状态并重置故障模式；⑧后端镜像改用官方 CPU-only PyTorch（消除 CUDA 运行时依赖）；⑨Langfuse 可选观测组件实现；⑩Alembic 迁移内 `CREATE EXTENSION IF NOT EXISTS vector`（CI/裸机不再依赖 db-init）；⑪compose `env_file` 改 `required: false`（干净 CI 无 `.env` 可 config/build）；⑫`backend/requirements.lock` 锁文件（pip-tools，Dockerfile/CI 以 `--constraint` 应用）；⑬评测脚本 OFFLINE 模式强制禁用 LLM（避免误用真实模型）与 CI 密钥扫描不泄露匹配内容；⑭多行采购单收满一行不得提前 received（仅全部明细收齐才 received，需求 6.3）；⑮建单过滤 `order_qty=0` 明细（净需求 0 不建 0 数量行）；⑯新增"库存与数据"只读页（库存/供应商/告警）与补货工作台计划详情展开（SKU 明细/阻断原因/下一步）；⑰e2e 前置脚本改 `seed --reset` 显式重建（消除前次运行残留导致的 PLAN_STALE）。
+- 收口修复：①`node_classify` 会话块外使用 session 的连接泄漏；②LLM 意图分类提示词与分类名展开；③Docker Compose 补 db 初始化 pgvector 扩展脚本；④seed 默认只在空库初始化、显式 `--reset` 才重建（保证 api 可重复启动不清数据）；⑤Dockerfile pip 镜像源/超时与层缓存顺序；⑥pgvector 向量检索改用 ORM（`Vector.cosine_distance`）修复 raw SQL 绑定失败；⑦e2e 采购单下拉按可读状态文本选中（容器环境残留历史 PO 时不再用 index 定位）+ 前置脚本检查种子状态并重置故障模式；⑧后端镜像改用官方 CPU-only PyTorch（消除 CUDA 运行时依赖）；⑨Langfuse 可选观测组件实现；⑩Alembic 迁移内 `CREATE EXTENSION IF NOT EXISTS vector`（CI/裸机不再依赖 db-init）；⑪compose `env_file` 改 `required: false`（干净 CI 无 `.env` 可 config/build）；⑫`backend/requirements.lock` 锁文件（pip-tools，Dockerfile/CI 以 `--constraint` 应用）；⑬评测脚本 OFFLINE 模式强制禁用 LLM（避免误用真实模型）与 CI 密钥扫描不泄露匹配内容；⑭多行采购单收满一行不得提前 received（仅全部明细收齐才 received，需求 6.3）；⑮建单过滤 `order_qty=0` 明细（净需求 0 不建 0 数量行）；⑯新增"库存与数据"只读页（库存/供应商/告警）与补货工作台计划详情展开（SKU 明细/阻断原因/下一步）；⑰e2e 前置脚本改 `seed --reset` 显式重建（消除前次运行残留导致的 PLAN_STALE）；⑱补货助手缺参澄清改为自然业务语言并明确引导仓库/SKU 或商品分类/规划周期（7/14/30 天），回复不再暴露 `warehouse_id` 等内部字段名，missing 白名单化；⑲预算/成本输入识别后明确说明“预算暂不参与 V1 计算”且绝不当必填参数（V2 金额阈值审批前不改变计算）；⑳补货助手新增可点击示例请求按钮；㉑补货工作台对建议数量为 0 的有效明细显示“无需采购”，计划行显示“可采购 X 条 / 无需采购 Y 条”，无可采购明细的计划提示不引导建单；㉒建单接口对全零计划返回稳定校验错误（422“该计划无需建单”，无副作用）并对同一计划重复建单返回可读 409（原依赖 DB 唯一约束 500），`/plans` 返回 `purchasable_count/zero_qty_count/has_po` 供页面过滤（只列正数量且未建单计划，全零/已建单计划给出提示）；㉓审批箱空状态说明待审批计划来源与已批准计划去向；㉔定时任务页面按角色提前禁用“立即执行”（操作员只读查看并说明仅管理员可用），后端 admin-only 校验保留（操作员直连 403 实测）；㉕执行记录默认只显示最近 20 条并明确标注；㉖测试 conftest 强制测试环境隔离（`POSTGRES_DSN`/`LLM_API_KEY=""`/内存 checkpoint），杜绝容器 `.env` 导致测试误连主库或真实调用 LLM；㉗工作台/采购单/执行记录等页面文案与状态中文统一核对（内部状态码仅作调试 title 展示）。
 
 ## 6. 关键设计与安全不变量
 
@@ -216,6 +217,7 @@ docker compose -f docker-compose.iso.yml down
 
 ## 9. 修订记录
 
+- 2026-09-02：V1 收口修复与验收（第二波）——补货助手缺参澄清业务语言+预算不参与说明+示例按钮；工作台“无需采购/可采购统计”；建单全零计划稳定 422 与重复建单 409 防护、`/plans` 增加可采购/无需采购/已建单统计；审批箱空状态引导；定时任务前端按角色禁用按钮（后端 403 保留）；执行记录默认最近 20 条；测试环境隔离加固。后端 136 passed（新增 7 项）、隔离 E2E 8 passed、真实浏览器 localhost:3000 验收 31 项全过（详情见 `.dev/accept_out.txt`）；7 项安全不变量不变量保持不变（领域规则/状态机/权限边界未改动）。
 - 2026-09-01：V1 发布收口第一轮功能优化——依赖可复现升级为双锁文件（`requirements-rag.lock` 锁定 base+rag、torch 固定 CPU 版 2.6.0+cpu、零 CUDA 依赖）；补货助手与审批箱错误可见性/恢复体验增强（缺参字段、阻断原因+下一步、PLAN_STALE 变化字段、order_unknown 只查询、幂等键区分、对话/LLM/RAG 状态区分）；新增 6 项单元测试与 3 个 Playwright 场景；全套测试 122 项、7 项安全不变量全为 0。
 - 2026-09-01：V1 发布候选审计与 CI 收口——修复 CI 真实阻塞（迁移内启用 pgvector 扩展、compose `env_file: required:false`、密钥扫描不泄露、CI 步骤顺序、`POSTGRES_DSN` 一致性）；新增 `requirements.lock` 依赖锁文件（Dockerfile/CI 以 `--constraint` 应用，torch 仍由官方 CPU 源固定 2.6.0+cpu）；评测脚本 OFFLINE 模式强制禁用 LLM（此前误用真实模型）；本地等价验证 CI backend 全流程与容器业务语义复验通过。
 - 2026-09-01：V1 发布基线收口——后端镜像 CPU-only PyTorch 瘦身（8.81GB → 2.21GB）；Langfuse 可选观测实现（mock 已验证、云端未验证）；黄金集评测 OFFLINE/真实 LLM 双模式分表；隔离全新部署验证通过；CI 增加容器构建检查与密钥扫描；全套测试 116 项、7 项安全不变量全为 0；四份基础文档同步升级 V4.3 / ADR 1.3 / AGENTS v1.3。

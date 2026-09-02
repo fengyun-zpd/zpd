@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ExecutionDto } from "../api/client";
 import { formatBlockerCode, formatNumber, formatStatus, formatTrigger, listLabel } from "../ui/format";
 
-/** 页面默认最多展示最近 50 条执行记录（不改数据库与审计语义，仅限制列表渲染量）。 */
-const MAX_LIST = 50;
+/** 页面默认只展示最近 20 条执行记录（避免大下拉；完整历史仍可通过 API 审计查询）。 */
+const MAX_LIST = 20;
 
 export function Executions() {
   const [executions, setExecutions] = useState<ExecutionDto[]>([]);
@@ -48,6 +48,11 @@ export function Executions() {
       )}
       {visible.length > 0 && (
         <>
+          <p className="hint">
+            {executions.length > MAX_LIST
+              ? `最近 ${MAX_LIST} 条（共 ${executions.length} 条，完整历史可在 API 审计中查询）`
+              : `最近 ${MAX_LIST} 条以内（共 ${executions.length} 条）`}
+          </p>
           <select value={selected} onChange={(e) => setSelected(e.target.value)}>
             <option value="">选择执行记录…</option>
             {visible.map((e) => (
@@ -56,9 +61,6 @@ export function Executions() {
               </option>
             ))}
           </select>
-          {executions.length > MAX_LIST && (
-            <p className="hint">列表仅展示最近 {MAX_LIST} 条；完整历史可在 API 审计中查询。</p>
-          )}
         </>
       )}
       {detail && (

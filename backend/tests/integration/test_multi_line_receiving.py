@@ -15,11 +15,12 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.constants import PO_CLOSED, PO_ORDERED, PO_PARTIALLY_RECEIVED, PO_RECEIVED
+from app.constants import PLAN_APPROVED, PO_CLOSED, PO_ORDERED, PO_PARTIALLY_RECEIVED, PO_RECEIVED
+from app.errors import InvalidStateTransitionError, ValidationError
 from app.models.purchasing import PurchaseOrder, PurchaseOrderLine
-from app.models.replenishment import PlanLine
+from app.models.replenishment import PlanLine, ReplenishmentPlan
 from app.services import plan_service, purchase_service
 from app.services.purchase_service import SupplierQueryResult, SupplierResult
 
@@ -208,9 +209,13 @@ def test_zero_qty_line_does_not_block_po_received(db_session):
     assert final_po.status == PO_RECEIVED, f"有数量行全收齐后（含 0 数量行）PO 应为 received，实际 {final_po.status}"
 
 
-def test_create_purchase_orders_skips_zero_qty_lines(db_session):
-    """Bug #2：建单时 order_qty=0 的明细不进入采购单。"""
-    # 构造一张已批准计划：2 行 valid，其中一行 order_qty=0
+def test_create_purchase_orders_rejects_all_zero_qty_plan(db_session):
+    """Bug #2 收口：全零计划（所有 valid 明细 order_qty=0）建单必须返回稳定校验错误，不能静默成功。
+
+    “订货量为 0 时不建单”的业务规则不变：不创建任何采购单；接口改为可理解的校验错误，
+    不再返回空数组让调用方误以为建单成功。错误发生在任何副作用之前（计划版本不增、无审计）。
+    """
+    # 构造一张已批准计划：1 行 valid，order_qty=0
     draft = plan_service.generate_draft(
         db_session,
         warehouse_id="WH-E",
@@ -239,6 +244,52 @@ def test_create_purchase_orders_skips_zero_qty_lines(db_session):
         idempotency_key=f"a-{uuid.uuid4().hex}",
     )
     db_session.commit()
+    plan = db_session.get(ReplenishmentPlan, draft.plan_id)
+    version_before = plan.version
+
+    with pytest.raises(ValidationError, match="无需建单"):
+        plan_service.create_purchase_orders(
+            db_session,
+            plan_id=draft.plan_id,
+            actor_id="dave",
+            idempotency_key=f"po-{uuid.uuid4().hex}",
+        )
+    db_session.rollback()
+    # 不应创建任何采购单；计划状态/版本不被破坏（无副作用）
+    db_session.expire_all()
+    assert db_session.scalar(select(PlanLine).where(PlanLine.plan_id == draft.plan_id).limit(1)) is not None
+    assert db_session.scalar(select(PurchaseOrder).where(PurchaseOrder.plan_id == draft.plan_id)) is None
+    plan2 = db_session.get(ReplenishmentPlan, draft.plan_id)
+    assert plan2.status == PLAN_APPROVED
+    assert plan2.version == version_before
+
+
+def test_create_purchase_orders_rejects_duplicate_po_for_same_plan(db_session):
+    """同一已批准计划重复建单必须被拒绝（稳定错误），不得走到 DB 唯一约束的 500。"""
+    draft = plan_service.generate_draft(
+        db_session,
+        warehouse_id="WH-E",
+        requested_window=14,
+        actor_id="alice",
+        products=["SKU-E01"],
+        operation_id=f"op-{uuid.uuid4().hex}",
+    )
+    db_session.commit()
+    assert draft.created
+    line = db_session.scalars(
+        select(PlanLine).where(PlanLine.plan_id == draft.plan_id, PlanLine.flag == "valid")
+    ).first()
+    if line is None:
+        pytest.skip("种子无 valid 明细")
+    plan_service.decide_plan(
+        db_session,
+        plan_id=draft.plan_id,
+        actor_id="carol",
+        mode="approve",
+        decisions={line.id: "approve"},
+        idempotency_key=f"a-{uuid.uuid4().hex}",
+    )
+    db_session.commit()
     pos = plan_service.create_purchase_orders(
         db_session,
         plan_id=draft.plan_id,
@@ -246,5 +297,18 @@ def test_create_purchase_orders_skips_zero_qty_lines(db_session):
         idempotency_key=f"po-{uuid.uuid4().hex}",
     )
     db_session.commit()
-    # 不应创建任何采购单（唯一明细 qty=0 被过滤）
-    assert pos == [], f"qty=0 明细不应建单，实际创建 {len(pos)} 张 PO"
+    assert len(pos) == 1
+
+    with pytest.raises(InvalidStateTransitionError, match="已创建过采购单"):
+        plan_service.create_purchase_orders(
+            db_session,
+            plan_id=draft.plan_id,
+            actor_id="dave",
+            idempotency_key=f"po2-{uuid.uuid4().hex}",
+        )
+    db_session.rollback()
+    # 只存在一张采购单
+    db_session.expire_all()
+    po_count_stmt = select(func.count()).select_from(PurchaseOrder).where(PurchaseOrder.plan_id == draft.plan_id)
+    count = db_session.scalar(po_count_stmt)
+    assert count == 1

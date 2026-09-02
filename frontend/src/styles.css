@@ -243,8 +243,37 @@ button.danger {
   background: rgba(251, 191, 36, 0.15);
   color: var(--warn);
 }
+/* 无需采购：建议数量为 0 的有效明细（库存/在途已满足，属正常业务结果） */
+.status-no_purchase {
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--muted);
+}
 .status-ordering {
   color: var(--muted);
+}
+
+/* 补货助手示例请求（可点击） */
+.example-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+.example-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: rgba(56, 189, 248, 0.08);
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+.example-chip:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.2);
+}
+.example-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .chat-log {

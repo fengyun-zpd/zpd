@@ -7,6 +7,7 @@ classify -> clarify | gather_evidence -> draft(interrupt) -> finalize
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import suppress
 
 from langgraph.errors import GraphInterrupt
@@ -40,6 +41,7 @@ def node_classify(state: AgentState) -> dict:
         "missing_params": [],
         "clarification": None,
         "offline": not _llm_enabled(),
+        "budget_note": False,
     }
     with factory() as session:
         parsed = offline.parse_params(text, session)
@@ -47,8 +49,9 @@ def node_classify(state: AgentState) -> dict:
             {
                 "intent": parsed.intent,
                 "params": parsed.params,
-                "missing_params": parsed.missing,
+                "missing_params": offline.normalize_missing(parsed.missing),
                 "clarification": parsed.clarification,
+                "budget_note": parsed.budget_note,
             }
         )
         if _llm_enabled():
@@ -63,7 +66,7 @@ def node_classify(state: AgentState) -> dict:
                 params = dict(llm_result.get("params", {}))
                 params["products"] = expanded if expanded else llm_products
                 result["params"] = params
-                missing = list(llm_result.get("missing", parsed.missing))
+                missing = offline.normalize_missing(list(llm_result.get("missing", parsed.missing)))
                 if not params.get("products"):
                     missing = list(dict.fromkeys(missing + ["product"]))
                 result["missing_params"] = missing
@@ -105,14 +108,20 @@ def route_after_classify(state: AgentState) -> str:
 
 def node_clarify(state: AgentState) -> dict:
     missing = list(state.get("missing_params", []) or [])
-    label = {
-        "warehouse": "仓库",
-        "product": "SKU 或商品范围",
-        "requested_window": "规划窗口（7/14/30 天）",
-    }
-    missing_label = "、".join(label.get(m, m) for m in missing) or "仓库、SKU、规划窗口"
+    missing_label = offline.missing_label(missing) or "仓库、SKU 或商品范围、规划周期"
+    # 自然业务语言引导：指出缺什么、怎么补、给可复制的完整句式
+    response = (
+        f"还需要补充：{missing_label}。\n"
+        "请提供以下信息：\n"
+        "① 仓库：如“华东仓”或“华南仓”；\n"
+        "② SKU 或商品分类：如“SKU-E01”或“紧固件”；\n"
+        "③ 规划周期：7 天 / 14 天 / 30 天。\n"
+        f"例如：{offline.REPLENISH_EXAMPLE}"
+    )
+    if state.get("budget_note"):
+        response += "\n" + offline.BUDGET_NOTE
     return {
-        "response": f"缺少必要参数：{missing_label}。请补充后重试。",
+        "response": response,
         "outcome": "clarified",
         "missing_params": missing,
     }
@@ -208,13 +217,16 @@ def node_draft(state: AgentState) -> dict:
             "response": f"本次没有可提交的补货建议。阻断原因：{reason}",
         }
     # 草稿已落库并提交待审批：先在状态中记录，再进入 wait 节点 interrupt 暂停
+    response = f"已生成补货草稿（计划 {draft['plan_id']}）并提交待审批，会话已暂停；审批人处理后会话自动恢复。"
+    if state.get("budget_note"):
+        response += "\n" + offline.BUDGET_NOTE
     return {
         "tool_calls": calls,
         "draft_result": draft,
         "plan_id": draft["plan_id"],
         "needs_approval": True,
         "outcome": "draft_created",
-        "response": (f"已生成补货草稿（计划 {draft['plan_id']}）并提交待审批，会话已暂停；审批人处理后会话自动恢复。"),
+        "response": response,
     }
 
 
@@ -259,28 +271,45 @@ def node_finalize(state: AgentState) -> dict:
 def node_respond(state: AgentState) -> dict:
     intent = state.get("intent", "other")
     text = state.get("user_input", "")
+    response = None
     if intent == "query":
-        return {"response": _query_response(text), "outcome": "answered"}
-    if intent == "explain":
-        return {
-            "response": "补货建议依据《补货策略总则》《安全库存规则》等文档，按确定性公式计算；"
-            "请查看计划明细中的公式、数据快照与规则引用（不可信检索文本不改变系统边界）。",
-            "outcome": "answered",
-        }
-    return {
-        "response": "我只能处理补货、库存查询与规则解释；该请求超出范围，无法执行。",
-        "outcome": "answered",
-    }
+        response = _query_response(text)
+    elif intent == "explain":
+        response = (
+            "补货建议依据《补货策略总则》《安全库存规则》等文档，按确定性公式计算；"
+            "请查看计划明细中的公式、数据快照与规则引用（不可信检索文本不改变系统边界）。"
+        )
+    else:
+        response = "我只能处理补货、库存查询与规则解释；该请求超出范围，无法执行。"
+    if state.get("budget_note"):
+        response += "\n" + offline.BUDGET_NOTE
+    return {"response": response, "outcome": "answered"}
 
 
 def _query_response(text: str) -> str:
+    """通用库存查询：解析文本中的仓库别名与 SKU，返回该 SKU 当前库存业务信息。
+
+    示例句式：“帮我检查华南仓 SKU-E08 未来7天库存”（query 意图，V1 只回答当前库存）。
+    """
     from app.agent import tools as _tools
 
-    parts = []
-    if "华东" in text or "WH-E" in text:
-        pid = "SKU-E01"
-        parts.append(str(_tools.get_inventory("WH-E", pid)))
-    return "\n".join(parts) if parts else "请指定仓库与 SKU 后再查询（例如：华东仓 SKU-E01 库存）。"
+    wh = None
+    for alias, wid in offline._WAREHOUSE_ALIASES.items():
+        if alias in text:
+            wh = wid
+            break
+    sku_matches = re.findall(r"SKU-?[A-Z0-9]+", text.upper().replace(" ", ""))
+    sku = None
+    if sku_matches:
+        raw = sku_matches[0]
+        sku = raw if raw.startswith("SKU-") else f"SKU-{raw.removeprefix('SKU')}"
+        if not sku.startswith("SKU-"):
+            sku = f"SKU-{raw}"
+    if wh and sku:
+        return str(_tools.get_inventory(wh, sku))
+    if sku:
+        return f"请指定仓库后再查询（例如：帮我检查华东仓 {sku} 的库存）。"
+    return "请指定仓库与 SKU 后再查询（例如：华东仓 SKU-E01 库存）。"
 
 
 # ---------------------------------------------------------------- 图构造

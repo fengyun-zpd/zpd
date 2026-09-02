@@ -49,6 +49,9 @@ export default function App() {
     setActorState(id);
   };
 
+  const currentUser = users.find((u) => u.actor_id === actor);
+  const currentRoles = currentUser ? currentUser.roles : [];
+
   const refresh = () => {
     setActorState(getActor());
   };
@@ -80,7 +83,7 @@ export default function App() {
         {page === "workbench" && <Workbench onSelectPlan={openPlanForApproval} />}
         {page === "approval" && <ApprovalBox onChanged={refresh} initialPlanId={approvalPlanId} />}
         {page === "purchase" && <PurchaseOrders />}
-        {page === "schedules" && <Schedules />}
+        {page === "schedules" && <Schedules roles={currentRoles} />}
         {page === "executions" && <Executions />}
         {page === "knowledge" && <RuleKnowledge />}
         {page === "data" && <DataView />}

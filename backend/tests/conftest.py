@@ -14,12 +14,15 @@ TEST_DSN = os.environ.get(
     "TEST_POSTGRES_DSN",
     "postgresql+psycopg://stockmind:stockmind@127.0.0.1:5432/stockmind_test",
 )
-os.environ.setdefault("POSTGRES_DSN", TEST_DSN)
-os.environ.setdefault("EMBEDDING_ENABLED", "false")
-os.environ.setdefault("MOCK_SUPPLIER_URL", "http://127.0.0.1:8100")
-os.environ.setdefault("ORDER_TIMEOUT_SECONDS", "5")
-# 测试会重建 schema，Postgres checkpoint 表随之消失；使用内存 checkpoint
-os.environ.setdefault("CHECKPOINTER_BACKEND", "memory")
+# 强制：无论外层环境（compose/.env）提供什么，测试进程所有 app factory 都指向测试库。
+os.environ["POSTGRES_DSN"] = TEST_DSN
+# 测试绝不调用真实 LLM（离线确定性）；schema 每测试重建，Postgres checkpoint 表随之
+# 重建，故强制内存 checkpoint（避免长驻连接被 DROP SCHEMA 终止后无法自愈）。
+os.environ["LLM_API_KEY"] = ""
+os.environ["CHECKPOINTER_BACKEND"] = "memory"
+os.environ["EMBEDDING_ENABLED"] = "false"
+os.environ["MOCK_SUPPLIER_URL"] = "http://127.0.0.1:8100"
+os.environ["ORDER_TIMEOUT_SECONDS"] = "5"
 
 import pytest  # noqa: E402
 from sqlalchemy import text  # noqa: E402

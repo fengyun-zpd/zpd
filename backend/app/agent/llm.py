@@ -83,6 +83,8 @@ def llm_parse_params(text: str) -> dict:
         "intent 固定为 replenish；'为什么/解释/依据'优先 explain；其余查询类为 query。"
         "仓库只能填 WH-E 或 WH-S；规划窗口只允许 7/14/30；"
         "无法确定的必填字段填 null 并把字段名放入 missing。"
+        "missing 只允许出现 warehouse、product、requested_window 三个值；"
+        "用户提到的预算/成本/金额不是 V1 参数，忽略且禁止放入 missing。"
         "示例：'帮我检查华东仓未来两周需要补货的紧固件' -> "
         '{"intent": "replenish", "warehouse_id": "WH-E", "products": ["紧固件"], '
         '"requested_window": 14, "missing": []}。'

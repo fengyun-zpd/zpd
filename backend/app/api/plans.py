@@ -6,11 +6,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 
 from app.api.deps import RequestContext, get_context, require_idempotency_key
 from app.db import get_session_factory
 from app.errors import StockMindError
+from app.models.purchasing import PurchaseOrder
 from app.models.replenishment import PlanLine, ReplenishmentPlan
 from app.services import plan_service
 from app.services.access import require_roles
@@ -110,7 +111,38 @@ def list_plans(
         if warehouse_id:
             stmt = stmt.where(ReplenishmentPlan.warehouse_id == warehouse_id)
         plans = session.scalars(stmt).all()
-        return {"request_id": ctx.request_id, "data": [_plan_dict(p) for p in plans]}
+        plan_ids = [p.id for p in plans]
+        # 每计划统计：可采购明细数（valid 且 order_qty>0）与无需采购明细数（valid 且 order_qty<=0）
+        stats: dict[str, tuple[int, int]] = {}
+        if plan_ids:
+            rows = session.execute(
+                select(
+                    PlanLine.plan_id,
+                    func.count().filter(PlanLine.flag == "valid", PlanLine.order_qty > 0),
+                    func.count().filter(PlanLine.flag == "valid", PlanLine.order_qty <= 0),
+                )
+                .where(PlanLine.plan_id.in_(plan_ids))
+                .group_by(PlanLine.plan_id)
+            ).all()
+            stats = {plan_id: (purchasable, zero) for plan_id, purchasable, zero in rows}
+        po_plan_ids: set[str] = set()
+        if plan_ids:
+            po_plan_ids = {
+                pid
+                for pid in session.scalars(
+                    select(PurchaseOrder.plan_id).where(PurchaseOrder.plan_id.in_(plan_ids))
+                ).all()
+                if pid is not None
+            }
+        data: list[dict] = []
+        for p in plans:
+            d = _plan_dict(p)
+            purchasable, zero = stats.get(p.id, (0, 0))
+            d["purchasable_count"] = purchasable
+            d["zero_qty_count"] = zero
+            d["has_po"] = p.id in po_plan_ids
+            data.append(d)
+        return {"request_id": ctx.request_id, "data": data}
 
 
 @router.get("/plans/{plan_id}")
@@ -125,6 +157,12 @@ def get_plan(plan_id: str, ctx: Annotated[RequestContext, Depends(get_context)])
             raise NotFoundError(f"计划不存在 {plan_id}")
         lines = session.scalars(select(PlanLine).where(PlanLine.plan_id == plan_id).order_by(PlanLine.product_id)).all()
         data = _plan_dict(plan, with_lines=True)
+        valid = [line for line in lines if line.flag == "valid"]
+        data["purchasable_count"] = sum(1 for line in valid if line.order_qty > 0)
+        data["zero_qty_count"] = sum(1 for line in valid if line.order_qty <= 0)
+        data["has_po"] = (
+            session.scalar(select(PurchaseOrder.id).where(PurchaseOrder.plan_id == plan_id).limit(1)) is not None
+        )
         data["lines"] = [_line_dict(line) for line in lines]
         return {"request_id": ctx.request_id, "data": data}
 

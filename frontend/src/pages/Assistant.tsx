@@ -37,8 +37,14 @@ const MISSING_LABEL: Record<string, string> = {
   warehouse_id: "仓库",
   product: "SKU 或商品范围",
   products: "SKU 或商品范围",
-  requested_window: "规划窗口（7/14/30 天）",
+  requested_window: "规划周期（7/14/30 天）",
 };
+
+// 可直接点击的示例请求（业务自然语言；后端 V1 离线/LLM 路径均可处理）
+const EXAMPLES: string[] = [
+  "帮我检查华东仓未来14天需要补货的紧固件",
+  "帮我检查华南仓 SKU-E08 未来7天库存",
+];
 
 export function Assistant({ onDraft }: { onDraft?: () => void }) {
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -57,9 +63,9 @@ export function Assistant({ onDraft }: { onDraft?: () => void }) {
     };
   }, []);
 
-  const send = async () => {
-    if (!input.trim() || busy) return;
-    const text = input.trim();
+  const send = async (textOverride?: string) => {
+    const text = (textOverride ?? input).trim();
+    if (!text || busy) return;
     setInput("");
     setMessages((m) => [...m, { role: "user", content: text }]);
     setBusy(true);
@@ -176,7 +182,23 @@ export function Assistant({ onDraft }: { onDraft?: () => void }) {
     <div className="card assistant">
       <h2>补货助手</h2>
       <p className="hint">
-        示例：“帮我检查华东仓未来两周需要补货的紧固件”。支持自然语言发起补货，Agent 会澄清必要参数并生成待审批草稿。
+        输入补货或库存查询请求，Agent 会澄清必要参数并生成待审批草稿。可点击以下示例直接体验：
+      </p>
+      <div className="example-chips">
+        {EXAMPLES.map((ex) => (
+          <button
+            key={ex}
+            type="button"
+            className="example-chip"
+            disabled={busy}
+            onClick={() => send(ex)}
+          >
+            {ex}
+          </button>
+        ))}
+      </div>
+      <p className="hint">
+        如需指定仓库、SKU/商品分类与规划周期（7/14/30 天），可直接在请求中说明；预算/成本约束暂不参与 V1 计算。
       </p>
       <div className="chat-log">
         {messages.map((m, i) => (
@@ -195,7 +217,7 @@ export function Assistant({ onDraft }: { onDraft?: () => void }) {
           placeholder="输入补货请求…"
           disabled={busy}
         />
-        <button onClick={send} disabled={busy || !input.trim()}>
+        <button onClick={() => send()} disabled={busy || !input.trim()}>
           {busy ? "处理中…" : "发送"}
         </button>
       </div>

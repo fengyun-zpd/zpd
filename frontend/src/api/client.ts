@@ -110,6 +110,10 @@ export interface PlanDto {
   revision_of_plan_id?: string | null;
   decision_version: number;
   version: number;
+  // 收口：可采购明细数（valid 且 order_qty>0）/无需采购明细数（valid 且 order_qty<=0）/是否已建单
+  purchasable_count?: number;
+  zero_qty_count?: number;
+  has_po?: boolean;
   lines?: PlanLineDto[];
 }
 

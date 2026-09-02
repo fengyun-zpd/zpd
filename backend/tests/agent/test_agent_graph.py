@@ -43,7 +43,13 @@ def test_agent_clarifies_when_params_missing(db_session):
     state, interrupted = run_turn("t2", "alice", "帮我补货")
     assert interrupted is False
     assert state.get("missing_params")
-    assert "缺少必要参数" in state.get("response", "")
+    response = state.get("response", "")
+    # 澄清使用自然业务语言：不暴露内部字段名，明确引导仓库/SKU/规划周期
+    for internal in ("warehouse_id", "products", "requested_window", "budget"):
+        assert internal not in response
+    assert "仓库" in response
+    assert "SKU" in response
+    assert "7/14/30" in response or "7 天 / 14 天 / 30 天" in response
 
 
 @pytest.mark.db

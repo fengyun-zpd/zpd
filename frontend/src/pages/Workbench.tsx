@@ -63,6 +63,7 @@ export function Workbench({ onSelectPlan }: { onSelectPlan?: (planId: string) =>
             <th>仓库</th>
             <th>触发方式</th>
             <th>状态</th>
+            <th>明细统计</th>
             <th>窗口</th>
             <th>版本</th>
             <th>操作</th>
@@ -71,36 +72,52 @@ export function Workbench({ onSelectPlan }: { onSelectPlan?: (planId: string) =>
         <tbody>
           {plans.length === 0 && (
             <tr>
-              <td colSpan={7} className="empty-cell">
+              <td colSpan={8} className="empty-cell">
                 当前没有计划。先到“补货助手”生成草稿，或在“定时任务”执行扫描。
               </td>
             </tr>
           )}
-          {plans.map((p) => (
-            <Fragment key={p.plan_id}>
-              <tr>
-                <td title={p.plan_id}>
-                  {listLabel(p.plan_id, [p.warehouse_id, formatStatus(p.status), `v${p.version}`])}
-                </td>
-                <td>{p.warehouse_id}</td>
-                <td>{formatTrigger(p.trigger_type)}</td>
-                <td>
-                  <span className={`badge status-${p.status}`}>{formatStatus(p.status)}</span>
-                </td>
-                <td>{p.requested_window} 天</td>
-                <td>v{p.version}</td>
-                <td>
-                  <button onClick={() => toggleDetail(p.plan_id)}>
-                    {expanded?.planId === p.plan_id ? "收起详情" : "查看详情"}
-                  </button>
-                  {p.status === "pending_approval" && (
-                    <button onClick={() => onSelectPlan?.(p.plan_id)}>打开审批</button>
-                  )}
-                </td>
-              </tr>
+          {plans.map((p) => {
+            const purchasable = p.purchasable_count ?? 0;
+            const zeroQty = p.zero_qty_count ?? 0;
+            const hasLines = purchasable + zeroQty > 0;
+            return (
+              <Fragment key={p.plan_id}>
+                <tr>
+                  <td title={p.plan_id}>
+                    {listLabel(p.plan_id, [p.warehouse_id, formatStatus(p.status), `v${p.version}`])}
+                  </td>
+                  <td>{p.warehouse_id}</td>
+                  <td>{formatTrigger(p.trigger_type)}</td>
+                  <td>
+                    <span className={`badge status-${p.status}`}>{formatStatus(p.status)}</span>
+                  </td>
+                  <td>
+                    {!hasLines && <span className="hint">-</span>}
+                    {hasLines && (
+                      <span>
+                        可采购 <strong>{purchasable}</strong> 条 · 无需采购{" "}
+                        <strong>{zeroQty}</strong> 条
+                        {purchasable === 0 && (
+                          <span className="hint">（该计划无需建单）</span>
+                        )}
+                      </span>
+                    )}
+                  </td>
+                  <td>{p.requested_window} 天</td>
+                  <td>v{p.version}</td>
+                  <td>
+                    <button onClick={() => toggleDetail(p.plan_id)}>
+                      {expanded?.planId === p.plan_id ? "收起详情" : "查看详情"}
+                    </button>
+                    {p.status === "pending_approval" && (
+                      <button onClick={() => onSelectPlan?.(p.plan_id)}>打开审批</button>
+                    )}
+                  </td>
+                </tr>
               {expanded?.planId === p.plan_id && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <div className="plan-detail">
                       <h4>计划 {shortId(p.plan_id)} · SKU 明细</h4>
                       {expanded.error && <p className="error">{expanded.error}</p>}
@@ -121,49 +138,62 @@ export function Workbench({ onSelectPlan }: { onSelectPlan?: (planId: string) =>
                           </tr>
                         </thead>
                         <tbody>
-                          {expanded.lines.map((l) => (
-                            <tr key={l.line_id}>
-                              <td>{l.product_id}</td>
-                              <td>
-                                <span
-                                  className={`badge ${
-                                    l.flag === "valid"
-                                      ? "status-success"
-                                      : l.flag === "blocked"
-                                        ? "status-blocked"
-                                        : "status-failed"
-                                  }`}
-                                  title={l.flag || undefined}
-                                >
-                                  {formatLineFlag(l.flag)}
-                                </span>
-                              </td>
-                              <td>{formatQuantity(l.order_qty)}</td>
-                              <td>{l.supplier_id || "-"}</td>
-                              <td title={l.forecast_algorithm || undefined}>
-                                {formatForecast(l.forecast_algorithm)}
-                              </td>
-                              <td>{formatDecimal(l.daily_forecast)}</td>
-                              <td>{formatDecimal(l.net_demand)}</td>
-                              <td>
-                                {l.flag === "blocked" ? (
-                                  <div className="hint">
-                                    {l.blocked_code ? (
-                                      <span title={l.blocked_code}>{formatBlockerCode(l.blocked_code)}</span>
-                                    ) : (
-                                      "已阻断"
-                                    )}
-                                    {l.blocked_reason && <span>：{l.blocked_reason}</span>}
-                                    {l.blocked_code && BLOCK_NEXT_STEP[l.blocked_code] && (
-                                      <div className="chat-next-step">下一步：{BLOCK_NEXT_STEP[l.blocked_code]}</div>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <span className="hint">-</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
+                          {expanded.lines.map((l) => {
+                            const needsNoPurchase = l.flag === "valid" && l.order_qty <= 0;
+                            const purchasable = l.flag === "valid" && l.order_qty > 0;
+                            const badgeClass = needsNoPurchase
+                              ? "status-no_purchase"
+                              : purchasable
+                                ? "status-success"
+                                : l.flag === "blocked"
+                                  ? "status-blocked"
+                                  : "status-failed";
+                            const badgeText = needsNoPurchase
+                              ? "无需采购"
+                              : purchasable
+                                ? "有效（可采购）"
+                                : formatLineFlag(l.flag);
+                            return (
+                              <tr key={l.line_id}>
+                                <td>{l.product_id}</td>
+                                <td>
+                                  <span className={`badge ${badgeClass}`} title={l.flag || undefined}>
+                                    {badgeText}
+                                  </span>
+                                </td>
+                                <td>{formatQuantity(l.order_qty)}</td>
+                                <td>{l.supplier_id || "-"}</td>
+                                <td title={l.forecast_algorithm || undefined}>
+                                  {formatForecast(l.forecast_algorithm)}
+                                </td>
+                                <td>{formatDecimal(l.daily_forecast)}</td>
+                                <td>{formatDecimal(l.net_demand)}</td>
+                                <td>
+                                  {l.flag === "blocked" ? (
+                                    <div className="hint">
+                                      {l.blocked_code ? (
+                                        <span title={l.blocked_code}>{formatBlockerCode(l.blocked_code)}</span>
+                                      ) : (
+                                        "已阻断"
+                                      )}
+                                      {l.blocked_reason && <span>：{l.blocked_reason}</span>}
+                                      {l.blocked_code && BLOCK_NEXT_STEP[l.blocked_code] && (
+                                        <div className="chat-next-step">
+                                          下一步：{BLOCK_NEXT_STEP[l.blocked_code]}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="hint">
+                                      {needsNoPurchase
+                                        ? "建议数量为 0：当前库存或在途已满足需求，无需采购"
+                                        : "-"}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -171,7 +201,8 @@ export function Workbench({ onSelectPlan }: { onSelectPlan?: (planId: string) =>
                 </tr>
               )}
             </Fragment>
-          ))}
+          );
+          })}
         </tbody>
       </table>
     </div>

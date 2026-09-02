@@ -69,6 +69,13 @@ export function PurchaseOrders() {
       .catch(() => setApprovedPlans([]));
   }, [orders]);
 
+  // 只允许：至少存在一条 order_qty>0 的可采购明细，且尚未建单
+  const selectablePlans = approvedPlans.filter(
+    (p) => (p.purchasable_count ?? 0) > 0 && !p.has_po
+  );
+  const zeroOnlyPlans = approvedPlans.filter((p) => (p.purchasable_count ?? 0) === 0 && !p.has_po);
+  const alreadyOrderedPlans = approvedPlans.filter((p) => p.has_po);
+
   const createPOs = async () => {
     if (!createPlanId) return;
     setError("");
@@ -86,10 +93,10 @@ export function PurchaseOrders() {
       <h2>采购单</h2>
       {error && <p className="error">{error}</p>}
       <div className="create-po">
-        <span>已批准计划（尚未建单）：</span>
+        <span>已批准计划（可建单）：</span>
         <select value={createPlanId} onChange={(e) => setCreatePlanId(e.target.value)}>
           <option value="">选择计划…</option>
-          {approvedPlans.map((p) => (
+          {selectablePlans.map((p) => (
             <option key={p.plan_id} value={p.plan_id} title={p.plan_id}>
               {listLabel(p.plan_id, [p.warehouse_id, formatStatus(p.status), `v${p.version}`])}
             </option>
@@ -99,6 +106,19 @@ export function PurchaseOrders() {
           创建采购单
         </button>
       </div>
+      {selectablePlans.length === 0 && (
+        <p className="empty-state">
+          当前没有可建单的已批准计划（下拉只列出至少存在一条正建议数量明细的计划）。
+        </p>
+      )}
+      {(zeroOnlyPlans.length > 0 || alreadyOrderedPlans.length > 0) && (
+        <p className="hint">
+          {zeroOnlyPlans.length > 0 &&
+            `${zeroOnlyPlans.length} 个已批准计划全部明细建议数量为 0（该计划无需建单：净需求已由库存或在途满足）。`}
+          {alreadyOrderedPlans.length > 0 &&
+            `${alreadyOrderedPlans.length} 个已批准计划已创建过采购单（不允许重复建单）。`}
+        </p>
+      )}
       <select value={selected} onChange={(e) => setSelected(e.target.value)}>
         <option value="">选择采购单…</option>
         {orders.map((o) => (

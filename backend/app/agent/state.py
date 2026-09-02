@@ -24,3 +24,4 @@ class AgentState(TypedDict, total=False):
     # 功能优化（V1 收口）：结构化结果，供前端明确展示阻断原因与下一步动作
     outcome: str  # draft_created / blocked / duplicate / clarified / answered
     blocked_lines: list[dict]  # 每行：{product_id, blocked_code, blocked_reason, next_step}
+    budget_note: bool  # 用户输入含预算/成本约束：V1 不参与计算，仅在回复中说明

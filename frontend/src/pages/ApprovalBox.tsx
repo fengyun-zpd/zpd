@@ -122,7 +122,11 @@ export function ApprovalBox({
           </option>
         ))}
       </select>
-      {plans.length === 0 && <p className="empty-state">当前没有待审批计划。请先生成补货草稿或执行定时扫描。</p>}
+      {plans.length === 0 && (
+        <p className="empty-state">
+          当前没有待审批计划。待审批计划会由补货助手生成或定时扫描产生；已批准计划请到“采购单”页面建单。
+        </p>
+      )}
 
       {detail && (
         <div className="approval-detail">
