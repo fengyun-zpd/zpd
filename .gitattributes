@@ -1,0 +1,11 @@
+# 统一 LF 行尾，保证 bash 脚本与容器内文件一致
+* text=auto eol=lf
+
+# 明确二进制类型
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

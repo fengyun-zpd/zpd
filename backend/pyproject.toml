@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockmind-backend"
+version = "0.1.0"
+description = "StockMind V1 - 可审计的智能仓储补货 Agent 后端"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "pydantic>=2.8,<3",
+    "pydantic-settings>=2.4,<3",
+    "sqlalchemy>=2.0.30,<3",
+    "alembic>=1.13,<2",
+    "psycopg[binary]>=3.2,<4",
+    "pgvector>=0.3,<1",
+    "celery[redis]>=5.4,<6",
+    "redis>=5.0,<6",
+    "langgraph>=0.3.30,<0.4",
+    "langchain-core>=0.3.0,<0.4",
+    "langchain-openai>=0.2.0,<0.4",
+    # 与 langgraph 0.3.x 匹配的 checkpoint-postgres 2.x 系列
+    "langgraph-checkpoint-postgres>=2.0.24,<2.1",
+    "jieba>=0.42,<1",
+    "croniter>=2.0,<3",
+    "sse-starlette>=2.1,<3",
+    "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+# rag：CPU-only PyTorch（本仓库仅使用 CPU Embedding，不安装 CUDA 运行时）。
+# torch 从官方 CPU wheel 源安装（download.pytorch.org/whl/cpu，见 Dockerfile），
+# 此处不声明 torch 版本约束，避免 pip 从通用源拉取带 CUDA 依赖的 torch。
+rag = [
+    "sentence-transformers>=4.1,<5",
+    "langfuse>=2.53,<3",
+]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<1",
+    "hypothesis>=6.100,<7",
+    "ruff>=0.5,<1",
+    "mypy>=1.10,<2",
+    "playwright>=1.45,<2",
+    "types-croniter>=3.0,<4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+markers = [
+    "db: 需要 PostgreSQL 数据库的测试",
+    "e2e: 端到端浏览器测试（需前端与后端运行）",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ARG"]
+ignore = ["B008", "ARG001"]
+
+# 种子/文档/提示文案文件包含长中文内容与数据行，允许超长行
+[tool.ruff.lint.per-file-ignores]
+"app/seed/documents.py" = ["E501"]
+"app/seed/seed.py" = ["E501"]
+"app/agent/blocked_hints.py" = ["E501"]  # 中文下一步动作文案天然超长
+"tests/e2e/*.py" = ["E501"]  # Playwright JS 选择器字符串超长
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = true
+no_implicit_optional = true

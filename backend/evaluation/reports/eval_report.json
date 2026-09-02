@@ -1,0 +1,21 @@
+{
+  "schema_version": "stockmind-eval-v1",
+  "api": "http://127.0.0.1:8000",
+  "metrics": {
+    "param_field_accuracy": 0.8571,
+    "necessary_clarify_rate": 1.0,
+    "rag_recall_at_5": 0.8,
+    "rag_mrr": 0.8,
+    "rag_citation_correctness": 1.0,
+    "forecast_mae": 1.3162,
+    "forecast_wape": 0.1445,
+    "forecast_algorithm": "wma_28_v1",
+    "dialog_task_completion_rate": 1.0,
+    "tool_call_correctness": 1.0,
+    "offline_mode": true,
+    "llm_token_cost": "未实测/预期（需真实 LLM 采样）",
+    "p50_p95_latency": "未实测/预期（需负载采样）",
+    "langfuse_trace": "未配置/未验证"
+  },
+  "corpus_fingerprint": "seed-20260831"
+}

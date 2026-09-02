@@ -7,7 +7,7 @@
 
 ## 第一章 总纲
 
-**第一条（身份）** 本仓库是 StockMind —— 一个面向中小制造与批发仓库的、可审计的智能补货 Agent 研发仓库。当前仓库只包含设计文档；代码、测试、评测结果和演示均尚未实现。
+**第一条（身份）** 本仓库是 StockMind —— 一个面向中小制造与批发仓库的、可审计的智能补货 Agent 研发仓库。当前仓库已达到 **V1 完整验收版（发布基线）**：Docker Compose 容器化启动、CPU-only PyTorch 镜像、Langfuse 可选观测、黄金集评测（OFFLINE 确定性 + 真实 LLM 双模式）、隔离全新部署验证齐备；合成演示数据由固定随机种子生成，未接入真实企业系统。真实 LLM 评测与 OFFLINE 评测分别报告；Langfuse 云端未验证（无凭证）。
 
 **第二条（目的）** 一切工作服务于构建一个“可审计、可解释、边界清晰”的补货决策系统。核心分工是：Agent 负责理解与编排，确定性领域服务负责计算与状态，授权人员负责高风险副作用。
 
@@ -65,5 +65,10 @@
 
 修订记录：
 
+- v1.3 功能优化（2026-09-01）—— 发布收口第一轮用户功能优化：补货助手与审批箱错误可见性/恢复体验增强（缺参列出需补充字段、阻断原因+下一步动作、PLAN_STALE 变化字段+排除/重算入口、order_unknown 仅查询恢复、幂等键区分原结果/异载荷冲突、对话模式与 RAG 状态区分展示）；依赖可复现升级为双锁文件（`requirements.lock` base+dev、`requirements-rag.lock` base+rag 含 torch==2.6.0+cpu、零 CUDA 依赖，均以官方 CPU 源解析）；新增 6 项单元测试与 3 个 Playwright 场景；全套测试 122 项、7 项安全不变量全为 0；未改变领域公式、权限边界、状态机与数据库事实源。
+- v1.3 审计收口（2026-09-01）—— V1 发布候选审计与 CI 收口：修复 CI 真实阻塞（Alembic 迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 使 Compose/CI/裸机三场景可靠；compose `env_file: required:false` 使干净 CI 无 `.env` 可 config/build；CI 密钥扫描只报文件名不泄露匹配内容；CI 步骤顺序与 `POSTGRES_DSN` 一致性）；新增 `backend/requirements.lock` 依赖锁文件（pip-tools，Dockerfile/CI 以 `--constraint` 应用，torch 仍由官方 CPU 源固定 2.6.0+cpu）；评测脚本 OFFLINE 模式强制禁用 LLM（此前误用真实模型，现真正确定性）；本地等价验证 CI backend 全流程与容器业务语义复验通过。CI 云端成功运行需 push 后由 GitHub Actions 执行（仓库未提交，无云端运行记录，如实标注）。
+- v1.3 发布基线（2026-09-01）—— V1 完整验收版发布基线收口：后端镜像瘦身（CPU-only PyTorch 2.6.0+cpu，8.81GB → 2.21GB，零 CUDA/nvidia 包）；Langfuse 可选观测实现（无凭证安全 no-op、脱敏、关联 request/trace/thread/plan id，本地 mock 单测 5 项通过，云端未验证）；黄金集评测升级为 OFFLINE 与真实 LLM 双模式分表报告（含 P50/P95、Token 采样；真实 LLM 对话 3 例 Token 859）；隔离 Compose 全新部署验证通过（独立 project/卷/端口，迁移/种子幂等、连通、OFFLINE 对话、Embedding 16 条向量、HTTP 冒烟闭环、容器 nginx 前端 Playwright E2E、停止重启）；CI 增加容器构建检查、密钥扫描、格式检查与迁移幂等；文档同步升级 V4.3 / ADR 1.3。真实 LLM 评测非确定性可复现性如实标注；Langfuse 云端 trace 唯一外部阻塞。
+- v1.2 收口（2026-09-01）—— V1 本机收口验收：Docker Compose 容器化启动已实测（7 服务 Up、容器内迁移/种子幂等可重复、api 重启可重复启动）、真实 LLM 对话验证通过、安全不变量 7 项专项检查全为 0、Embedding 向量路径容器内实测通过、黄金集评测入口建立；README 与四份基础文档同步登记收口结果。
+- v1.2（2026-08-31）—— V1 本机闭环实现完成，更新第一条仓库身份描述（代码/迁移/测试/前端已实现，正式评测指标尚未产出）；对应四份基础文档同步至 V4.2 / ADR 1.2。
 - v1.1（2026-08-31）—— 根据四份 V4.1 基础文档，补充版本与文档权威、双触发恢复、受控草稿、数据库事实源、输入新鲜度、幂等并发、外部未知状态恢复、不可信检索内容和扩展安全不变量。
 - v1.0（2026-08-31）—— 创建。

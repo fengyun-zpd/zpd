@@ -11,15 +11,37 @@ desktop.ini
 *.tmp
 *.bak
 
-# 后续代码/数据占位（当前仓库仅含设计文档）
-node_modules/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
-__pycache__/
-*.pyc
 .pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 dist/
 build/
+
+# Node / 前端
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# 环境与本地数据
+.env
+*.local
+
+# 开发环境脚本（非交付物）
+.dev/
+
+# 模拟供应商本地状态
+mock_supplier_store.json
+
+# 编辑器
 .idea/
 .vscode/
 *.iml

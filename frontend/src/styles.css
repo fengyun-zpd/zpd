@@ -1,0 +1,374 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --border: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --danger: #f87171;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.topbar h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.actor-switcher {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.actor-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.actor-roles {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.nav {
+  display: flex;
+  gap: 6px;
+  margin: 14px 0;
+  flex-wrap: wrap;
+}
+
+.nav-btn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.nav-btn.active {
+  background: var(--accent);
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 16px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.empty-state {
+  color: var(--warn);
+  border: 1px dashed var(--warn);
+  border-radius: 7px;
+  padding: 10px 12px;
+  margin: 12px 0 0;
+}
+
+.empty-cell {
+  color: var(--muted);
+  text-align: center;
+  padding: 22px 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+select,
+input,
+button {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #0f172a;
+  color: var(--text);
+  font-size: 13px;
+}
+
+button {
+  cursor: pointer;
+  background: var(--panel);
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+/* 助手消息状态展示（V1 收口功能优化） */
+.status-offline {
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--muted);
+}
+.status-llm {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--ok);
+}
+.chat-meta {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.chat-detail {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  background: rgba(148, 163, 184, 0.08);
+  border-left: 3px solid var(--warn);
+  font-size: 13px;
+  white-space: normal;
+}
+.chat-block-line {
+  margin-bottom: 4px;
+}
+.chat-next-step {
+  color: var(--accent);
+  margin-top: 2px;
+}
+.error-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.status-pending_approval {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--warn);
+}
+.status-approved {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--ok);
+}
+.status-rejected,
+.status-cancelled,
+.status-failed {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+}
+.status-superseded,
+.status-closed,
+.status-received {
+  color: var(--muted);
+}
+.status-po_created,
+.status-ordered,
+.status-success {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent);
+}
+.status-order_unknown,
+.status-partially_received,
+.status-blocked {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--warn);
+}
+.status-ordering {
+  color: var(--muted);
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0;
+  min-height: 160px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.chat-msg {
+  display: flex;
+  gap: 10px;
+}
+
+.chat-msg.user {
+  flex-direction: row-reverse;
+}
+
+.chat-role {
+  color: var(--muted);
+  font-size: 12px;
+  align-self: flex-start;
+  margin-top: 6px;
+}
+
+.chat-content {
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  max-width: 80%;
+}
+
+.chat-input {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-input input {
+  flex: 1;
+}
+
+.approval-detail,
+.po-detail,
+.exec-detail {
+  margin-top: 14px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.evidence {
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 12px;
+}
+
+.evidence pre {
+  white-space: pre-wrap;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0;
+}
+
+.hit {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.hit-title {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.hit pre {
+  white-space: pre-wrap;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.doc {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+
+.doc summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.doc-chunk {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.plan-detail {
+  padding: 8px 4px;
+}
+.nav-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.empty-cell {
+  text-align: center;
+  color: var(--muted);
+  padding: 14px;
+}

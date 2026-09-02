@@ -1,8 +1,8 @@
 # StockMind 架构设计文档
 
-> **版本**：V4.1  
-> **修订日期**：2026-08-31  
-> **状态**：设计已确认，代码尚未实现  
+> **版本**：V4.3
+> **修订日期**：2026-09-01
+> **状态**：V1 完整验收版（发布基线）已实现并本机运行验证
 > **首版**：V1 本机 Docker Compose 完整闭环
 
 ## 1. 设计原则
@@ -29,7 +29,7 @@ flowchart TB
   X[(Redis)]
   C[Celery Worker + Beat]
   S[模拟供应商 API]
-  O[Langfuse Cloud]
+  O[Langfuse Cloud（可选）]
   A[审计与执行记录]
 
   UI --> API
@@ -47,14 +47,14 @@ flowchart TB
   D --> S
   API --> A
   C --> A
-  G -.脱敏 trace.-> O
-  D -.业务 span.-> O
+  G -.脱敏 trace（可选）.-> O
+  D -.业务 span（可选）.-> O
 ```
 
 ### 2.1 请求责任
 
 | 请求/动作 | 入口 | 负责组件 | LLM 是否参与 | 是否有副作用 |
-|---|---|---|:---:|:---:|
+|---|---|:---:|:---:|
 | 手动对话、澄清、生成草稿 | SSE | LangGraph | 是 | 仅创建经校验的草稿 |
 | 定时低库存扫描 | Celery | 扫描/领域服务 | 否，可复用只读工具 | 创建草稿 |
 | 审批/排除/驳回 | REST | 领域服务 + 事务 | 否 | 是 |
@@ -98,7 +98,7 @@ Agent State 至少包含 `thread_id`、`actor_id`、原始请求摘要、结构�
 
 ### 3.1 Agent 工具白名单
 
-只读工具：查询商品、仓库、库存、在途、历史需求、供应商关系、规则候选和预测回测。  
+只读工具：查询商品、仓库、库存、在途、历史需求、供应商关系、规则候选和预测回测。
 受控工具：生成补货草稿。它只能接收强类型参数，调用领域服务并执行数量、规则、权限和幂等校验。
 
 LLM 不可调用审批、创建采购单、下单、查询恢复、收货、关闭/取消、修改规则、定时任务配置和切换故障模式。所有工具调用都有输入长度限制、参数白名单、超时、错误码和工具审计。
@@ -250,6 +250,8 @@ Celery Beat 读取带 IANA 时区的 Web 配置，Celery Worker 执行扫描；V
 
 每个仓库/SKU 使用独立事务或保存点。数据、规则或供应关系缺失及规则冲突标记为 `blocked`，未分类运行异常标记为 `failed`；二者都只影响当前行并产生或刷新去重告警，其他 SKU 继续。手动重跑复用原执行上下文或创建带来源引用的新执行记录，仍受活动建议约束和行级幂等键保护。
 
+**实现说明**：定时扫描为每个有效仓库各生成一张待审批计划（计划按仓库维度，与 `active_for_dedupe` 部分唯一索引的 (warehouse_id, product_id) 粒度一致）；一次扫描可能产生多张计划，执行记录与逐 SKU 执行明细保持完整血缘。
+
 每个扫描对象都写入 `execution_item`，保存 warehouse/product、`success/blocked/failed` 状态、错误码、阻断原因、计划明细引用、告警引用和 trace id。即使没有任何有效建议，也能通过 execution + execution_item 完整解释本次扫描，而无需创建空计划。
 
 V1 告警只在页面展示；邮件/企业微信、复杂重试策略和公网部署放 V1.1。
@@ -266,12 +268,13 @@ V1 通过 actor_id 查种子用户角色；`system` 是 Celery 使用的内部�
 
 ## 11. 可观测、测试与评测
 
-- Langfuse：trace/span/generation、工具耗时、Token、成本；输入输出脱敏；
+- Langfuse（可选，默认 no-op）：trace/span/generation、工具耗时、Token、成本；输入输出脱敏；未配置凭证时不初始化客户端、无网络请求，观测失败不影响业务；云端验证需真实凭证；
 - 审计：操作者、动作、前后状态、对象、错误码和时间；不记密钥和完整 Prompt；
-- 测试：pytest、Hypothesis、Playwright、Ruff、Mypy、GitHub Actions；
-- 评测：参数字段准确率、RAG Recall/MRR/引用正确率、任务完成率、工具调用正确率、必要澄清率、MAE/WAPE、P50/P95、Token/成本；
+- 测试：pytest、Hypothesis、Playwright、Ruff、Mypy、GitHub Actions（无密钥环境可运行）；pgvector 扩展由迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 保证（Compose/CI/裸机三场景可靠）；依赖以双锁文件精确约束（`requirements.lock` base+dev、`requirements-rag.lock` base+rag，torch 由 Dockerfile 官方 CPU 源固定 2.6.0+cpu 且零 CUDA 依赖）；CI 云端成功运行需 push 后由 Actions 执行（未提交则无云端记录）；
+- 评测：参数字段准确率、RAG Recall/MRR/引用正确率、任务完成率、工具调用正确率、必要澄清率、MAE/WAPE、P50/P95、Token/成本；按 OFFLINE 与真实 LLM 双模式分表报告，报告含样本量、并发度、机器、模型与运行时间戳；成本优先读取可配置单价，缺少单价只报告 Token；
 - 安全不变量：越权操作、重复有效建议、重复采购、重复入库、未知状态盲目重试、非法状态迁移、幂等键异载荷副作用必须为 0；
-- 评测集固定随机种子，报告保存用例哈希和语料指纹。
+- 评测集固定随机种子，报告保存用例哈希和语料指纹；
+- 镜像交付：仅使用 CPU Embedding，后端镜像采用官方 CPU-only PyTorch（不安装 CUDA 运行时）。
 
 ## 12. 版本路线
 
@@ -279,15 +282,20 @@ V1 通过 actor_id 查种子用户角色；`system` 是 Celery 使用的内部�
 
 | 版本 | 范围 |
 |---|---|
-| V1 | 双触发、单 Agent、混合检索、结构化规则、确定性计算、HITL、采购闭环、故障注入、页面告警、Langfuse、测试、Docker |
+| V1 | 双触发、单 Agent、混合检索、结构化规则、确定性计算、HITL、采购闭环、故障注入、页面告警、Langfuse（可选）、测试、Docker、发布基线（CPU-only 镜像、隔离部署验证、CI 无密钥） |
 | V1.1 | 公网部署、JWT/OAuth、文档运营、Cross-Encoder、邮件/企微告警、容量与灰度 |
 | V2 | 动态安全库存、金额阈值审批、预算/供应商优化、多模型路由 |
 
 ## 13. 诚实边界
 
-当前没有实现代码、测试、评测数字或真实外部系统接入。不得把规划中的能力写成已完成，不得声称完整 WMS、多租户、高并发或生产级认证。
+V1 完整验收版已实现并运行验证（代码/迁移/测试/前端齐备；Docker 镜像 CPU-only PyTorch、Langfuse 可选观测、黄金集双模式评测、隔离全新部署验证均已实测）。仍不声称：完整 WMS、多租户、高并发、生产级认证或真实企业系统接入；对话在无 LLM Key 时运行离线演示模式，配置 Key 时使用真实模型（已实测 DeepSeek）；真实 LLM 评测结果非确定性，小样本延迟不构成容量结论；Langfuse 云端 trace 未验证（未配置凭证）；成本仅在有可配置单价时估算。
 
 ## 14. 修订记录
 
+- V4.3 功能优化（2026-09-01）：发布收口第一轮用户功能优化——前端错误可见性/恢复体验增强（助手缺参/阻断/下一步展示、审批箱 PLAN_STALE 变化字段与排除/重算入口、order_unknown 只查询提示、对话模式与 RAG 状态区分）；依赖可复现升级为双锁文件（`requirements.lock` base+dev、`requirements-rag.lock` base+rag 含 torch==2.6.0+cpu，均以官方 CPU 源解析，零 CUDA 依赖）；新增 6 项单元测试与 3 个 Playwright 场景；全套测试 122 项、7 项安全不变量全为 0；未改变任何核心架构决策。
+- V4.3 审计收口（2026-09-01）：V1 发布候选审计与 CI 收口——Alembic 迁移内启用 pgvector 扩展（CI 的 PostgreSQL service 不挂载 db-init 目录，迁移自足可靠）；compose `env_file: required: false`（干净 CI 无 `.env` 可 config/build）；新增 `requirements.lock` 依赖锁文件（pip-tools，Dockerfile/CI 以 `--constraint` 应用）；CI 密钥扫描只报文件名不泄露匹配内容；CI 步骤顺序（干净库迁移→种子幂等→pytest）与 `POSTGRES_DSN` 一致性；评测 OFFLINE 模式强制禁用 LLM。CI 云端成功运行需 push 后由 GitHub Actions 执行，未提交仓库前无云端运行记录。
+- V4.3 发布基线（2026-09-01）：V1 完整验收版发布基线收口——镜像交付规范（CPU-only PyTorch 2.6.0+cpu，不装 CUDA 运行时，8.81GB → 2.21GB）；观测组件规范（Langfuse 可选：无凭证安全 no-op、脱敏、关联 request/trace/thread/plan id，本地 mock 单测通过，云端未验证）；评测组件规范（OFFLINE 与真实 LLM 双模式分表，含 P50/P95/Token/成本规则）；隔离全新部署验证（独立 project/卷/端口）与 CI 无密钥可运行；全套后端测试 116 项、7 项安全不变量全为 0。
+- V4.2 收口（2026-09-01）：本机收口验收——Docker Compose 容器化启动已实测（7 服务 Up，api 重启可重复启动）；Embedding 向量路径容器内实测通过；黄金集评测入口建立；修复 pgvector 检索 ORM 绑定、seed 后 alembic stamp、db 初始化扩展、Dockerfile 构建优化。
+- V4.2（2026-08-31）：V1 实现完成——补充实现说明（定时扫描按仓库各建一张待审批计划），修正"代码尚未实现"状态描述。
 - V4.1（2026-08-31）：明确确定性计算顺序与数值规范、数据库审批权威、持久化恢复请求、决策新鲜度、活动建议生命周期、采购承诺和下单尝试、收货原子性、统一幂等/锁及定时逐 SKU 隔离。
 - V4.0（2026-08-31）：确认 V1 完整本机架构。

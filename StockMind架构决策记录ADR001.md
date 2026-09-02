@@ -1,11 +1,11 @@
 # ADR 001：确定性领域服务 + 单 Agent 工作流 + PostgreSQL 基础设施
 
-> **修订版本**：1.1  
-> **修订日期**：2026-08-31
+> **修订版本**：1.3
+> **修订日期**：2026-09-01
 
 ## 状态
 
-接受（设计已确认，代码尚未实现）
+接受（V1 完整验收版已实现并运行验证；发布基线收口完成）
 
 ## 背景
 
@@ -74,7 +74,7 @@ V1 通过 `actor_id` 查询种子用户角色，不实现真实登录。角色�
 | Celery Worker/Beat | 定时扫描和后台恢复 |
 | Docker Compose | V1 本机一键启动 |
 
-V1 不部署独立搜索引擎、Milvus、消息总线或多模型网关；Langfuse 使用云服务。公网部署、Cross-Encoder、邮件告警和复杂容量方案放 V1.1。
+V1 不部署独立搜索引擎、Milvus、消息总线或多模型网关；Langfuse 使用云服务（可选，默认 no-op）。公网部署、Cross-Encoder、邮件告警和复杂容量方案放 V1.1。
 
 **选择理由**：中小项目中单一主数据库减少事务边界和运维复杂度，pgvector 足以支撑合成数据演示；Redis/Celery 能真实展示定时任务、锁和失败恢复。
 
@@ -150,7 +150,9 @@ V1 不部署独立搜索引擎、Milvus、消息总线或多模型网关；Langf
 - 28 日基线、固定 `alpha=0.3` 和安全库存降级是可复现的 V1 基线，不代表已证明适合真实业务；
 - 前端身份切换不等于真实认证；
 - RAG 只做基础混合检索，重排和文档运营留到 V1.1；
-- 合成数据不能证明真实库存成本或经营收益。
+- 合成数据不能证明真实库存成本或经营收益；
+- Langfuse 云端观测依赖外部凭证；无凭证时保持本地结构化记录，云端 trace 未验证；
+- CPU-only PyTorch 用于本仓库 CPU Embedding 场景，不提供 GPU 加速能力。
 
 ## 不采用的方案
 
@@ -163,6 +165,7 @@ V1 不部署独立搜索引擎、Milvus、消息总线或多模型网关；Langf
 | 爬取数据替代供应商模型 | 脏数据、合规和业务关系缺失 |
 | SQLite + 临时向量库 | 难以同时演示事务、向量和并发锁 |
 | V1 部署 Milvus/独立搜索引擎 | 运维复杂度超过首版价值 |
+| 安装 CUDA 版 PyTorch | 本仓库仅 CPU Embedding，CUDA 运行时徒增镜像体积（8.81GB → 2.21GB） |
 
 ## 版本边界
 
@@ -170,7 +173,7 @@ V1 不部署独立搜索引擎、Milvus、消息总线或多模型网关；Langf
 
 ### V1
 
-完整本机闭环：双触发、单 Agent、多轮澄清、混合检索、结构化规则、预测/补货/供应商工具、逐条审批、按供应商拆单、模拟供应商故障、未知状态恢复、分批收货、页面告警、审计、Langfuse、自动化测试和 Docker Compose。
+完整本机闭环：双触发、单 Agent、多轮澄清、混合检索、结构化规则、预测/补货/供应商工具、逐条审批、按供应商拆单、模拟供应商故障、未知状态恢复、分批收货、页面告警、审计、Langfuse（可选）、自动化测试、Docker Compose、发布基线（CPU-only 镜像、隔离全新部署验证、CI 无密钥可运行）。
 
 ### V1.1
 
@@ -182,5 +185,10 @@ V1 不部署独立搜索引擎、Milvus、消息总线或多模型网关；Langf
 
 ## 修订记录
 
+- 1.3 功能优化（2026-09-01）：发布收口第一轮用户功能优化——依赖可复现升级为双锁文件（`requirements.lock` base+dev、`requirements-rag.lock` base+rag，均以官方 CPU 源解析；`requirements-rag.lock` 内含 `torch==2.6.0+cpu` 且零 nvidia/triton/cuda-* 依赖，避免基于 PyPI CUDA torch 解析导致安装冲突或镜像膨胀）；前端错误可见性/恢复体验增强（阻断码→下一步映射、PLAN_STALE 变化字段、order_unknown 只查询、幂等键区分）；未改变任何核心架构决策。
+- 1.3 审计收口（2026-09-01）：V1 发布候选审计与 CI 收口——pgvector 扩展改由 Alembic 迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 确保（Compose/CI/裸机三场景可靠，CI 的 PostgreSQL service 不挂载 db-init 目录）；compose `env_file` 改 `required: false`（干净 CI 无 `.env` 可 config/build）；新增 `requirements.lock` 依赖锁文件（pip-tools，Dockerfile/CI 以 `--constraint` 应用，torch 仍由官方 CPU 源固定）；CI 密钥扫描只报文件名不泄露匹配内容、步骤顺序与 `POSTGRES_DSN` 一致性；评测 OFFLINE 模式强制禁用 LLM。CI 云端成功运行需 push 后由 GitHub Actions 执行（未提交仓库无云端记录）；未改变任何核心架构决策。
+- 1.3 发布基线（2026-09-01）：V1 完整验收版发布基线收口——镜像交付采用官方 CPU-only PyTorch（2.6.0+cpu，仅 CPU Embedding，不装 CUDA 运行时，镜像 8.81GB → 2.21GB）；Langfuse 观测采用 2.x 低层 API 封装为可选组件（无凭证安全 no-op、脱敏、关联 request/trace/thread/plan id；本地 mock 单测通过，云端未验证不改变业务）；黄金集评测升级为 OFFLINE 与真实 LLM 双模式分表；隔离全新部署验证（独立 project/卷/端口）与 CI 无密钥可运行纳入 V1 验收；未改变任何核心架构决策。
+- 1.2 收口（2026-09-01）：V1 本机收口验收——Docker Compose 容器化启动已实测（7 服务 Up、容器内迁移/种子幂等可重复、api 重启可重复启动）；Embedding 向量路径容器内实测通过；黄金集评测入口建立；修复 Agent `node_classify` 会话连接泄漏、pgvector 检索 ORM 绑定、seed 后 `alembic stamp head`、db 初始化 pgvector 扩展与 Dockerfile 构建优化；未改变任何架构决策。
+- 1.2（2026-08-31）：V1 实现完成——记录两条实现性澄清：①定时扫描为每个有效仓库各生成一张待审批计划（计划按仓库维度，与活动建议部分唯一索引粒度一致）；②LangGraph checkpoint 在生产/Compose 使用 PostgreSQL，开发/测试使用内存后端（`CHECKPOINTER_BACKEND=memory`），业务状态始终以业务数据库为准。
 - 1.1（2026-08-31）：确定计算顺序与数值规范、数据库审批权威、持久化恢复请求、决策新鲜度、活动建议与采购承诺双层防重、采购下单尝试/恢复、统一幂等/锁和定时逐 SKU 隔离。
 - 1.0（2026-08-31）：接受核心架构决策。

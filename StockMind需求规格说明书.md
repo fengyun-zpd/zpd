@@ -1,9 +1,9 @@
 # StockMind 智能仓储补货 Agent - 需求规格说明书
 
-> **版本**：V4.1  
-> **修订日期**：2026-08-31  
-> **状态**：设计已确认，代码尚未实现  
-> **首版范围**：V1 本机 Docker Compose 完整演示  
+> **版本**：V4.3
+> **修订日期**：2026-09-01
+> **状态**：V1 完整验收版（发布基线）已实现并本机运行验证
+> **首版范围**：V1 本机 Docker Compose 完整演示
 > **数据声明**：全部为固定随机种子生成的合成数据
 
 ## 0. 产品定位
@@ -270,19 +270,27 @@ API 至少覆盖：会话流式对话、补货计划查询/审批、采购单创
 
 分别报告：参数字段准确率；Recall@k、MRR、引用正确率；算法示例/边界/性质测试；任务完成率、正确工具调用率、必要澄清率；MAE/WAPE；P50/P95、Token 和成本。安全不变量单独报告：越权操作成功数、重复有效建议数、重复采购数、重复入库数、未知状态盲目重试数、非法状态迁移成功数、幂等键异载荷产生副作用数均必须为 0。其他结果只填写实测数字。
 
-测试工具：`pytest`、`Hypothesis`、`Playwright`、Ruff、Mypy 和 GitHub Actions。核心评测必须可由固定种子重跑，报告带用例哈希和语料指纹。
+**评测分表（V4.3）**：黄金集评测按 OFFLINE 确定性模式与真实 LLM 模式分表报告，报告包含样本量、并发度、机器、模型与运行时间戳；真实 LLM 与 OFFLINE 指标不混报；成本优先读取可配置单价（`LLM_PRICE_PER_1K_INPUT/OUTPUT`），缺少单价时只报告 Token；小样本延迟不构成容量结论；Langfuse 无凭证时性能与 Token 通过本地结构化记录采集，云端 trace 标记未验证。
+
+测试工具：`pytest`、`Hypothesis`、`Playwright`、Ruff、Mypy 和 GitHub Actions。核心评测必须可由固定种子重跑，报告带用例哈希和语料指纹。CI 在无真实密钥环境运行：不配置 LLM/Langfuse 凭证，后端以 OFFLINE 模式测试；pgvector 扩展由 Alembic 迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 保证（CI 的 PostgreSQL service 不挂载 db-init 目录）；依赖以 `requirements.lock` 精确约束；compose `env_file` 使用 `required: false`（干净 checkout 无 `.env` 仍可 config/build）；另含容器构建检查与密钥泄露扫描（只报文件名）。CI 云端成功运行需 push 后由 GitHub Actions 执行；workflow 文件存在不等于 CI 已通过，未提交仓库前无云端运行记录。
 
 ## 11. 非功能与诚实边界
 
 - 默认实现与验收范围为 V1；只有用户明确指定时才设计 V1.1/V2 能力，且必须标注为规划中、未实现；
 - V1：Docker Compose 本机启动；V1.1 再做公网部署；
 - 数据库：PostgreSQL + pgvector；缓存/任务协调：Redis；
-- 观测：Langfuse Cloud，输入输出脱敏；
+- 观测：Langfuse Cloud（可选，默认 no-op），输入输出脱敏；未配置凭证时安全 no-op，配置后记录对话/LLM/工具/RAG/领域计算与错误并脱敏；云端验证需真实凭证；
 - 审计：操作者、业务动作、前后状态、错误码和关联对象，不记密钥和完整 Prompt；
-- 当前没有代码、测试、评测结果或真实外部接口，所有能力均不得写成已完成；
+- V1 已实现并本机运行验证：Docker Compose、领域服务/API、迁移与种子、Celery、LangGraph 对话、RAG、确定性计算、前端八页面与测试套件齐备；对话在无 LLM Key 时运行离线演示模式（页面标注 offline，不冒充真实 LLM），配置 LLM Key 时使用真实模型（已实测 DeepSeek 完成意图/参数提取与草稿生成）。评测状态：安全不变量 7 项专项检查全为 0；黄金集评测（固定种子可复现）已产出 OFFLINE 与真实 LLM 双模式分表报告——参数字段准确率 0.857、必要澄清率 1.0、RAG Recall@5=0.8 / MRR=0.8 / 引用正确率 1.0、MAE 1.32 / WAPE 0.14、OFFLINE 任务完成率 0.667 / 工具调用正确率 0.929、真实 LLM 任务完成率 0.667 / 工具调用正确率 0.929（真实 LLM 模式非确定性，小样本不构成容量结论）、P50/P95 实测、Token 实测（真实 LLM 3 例总量 859）；成本仅在有可配置单价时估算，未配置则只报告 Token；Langfuse 观测代码已实现、本地 mock 单测通过，云端未验证（未配置凭证）；
+- 镜像交付：本仓库仅使用 CPU Embedding，后端镜像使用官方 CPU-only PyTorch（不安装 CUDA 运行时）；
 - 不承诺完整 WMS、多租户、高并发、真实供应商接入或生产级认证。
 
 ## 12. 修订记录
 
+- V4.3 功能优化（2026-09-01）：发布收口第一轮用户功能优化——错误可见性验收要求明确：缺参列出需补充字段、阻断显示原因与下一步、PLAN_STALE 显示变化字段并提供排除/重算入口、order_unknown 仅查询恢复、幂等键区分原结果/异载荷冲突、页面区分 OFFLINE/真实 LLM/关键词 RAG/向量 RAG 状态；依赖可复现验收补充 `requirements-rag.lock`（base+rag 精确锁定，torch 固定官方 CPU 源 2.6.0+cpu、零 CUDA 依赖）；新增 6 项单元测试与 3 个 Playwright 场景；全套测试 122 项、7 项安全不变量全为 0。未改变领域公式、权限边界、状态机与数据库事实源。
+- V4.3 审计收口（2026-09-01）：V1 发布候选审计与 CI 收口——CI 验收明确为"workflow 文件存在不等于 CI 已通过"：Alembic 迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 使 pgvector 扩展在 Compose/CI/裸机三场景可靠（CI 的 PostgreSQL service 不挂载 db-init 目录）；compose `env_file` 使用 `required: false`（干净 CI 无 `.env` 可 config/build）；CI 密钥扫描只报文件名不泄露匹配内容；CI 步骤顺序修正（干净库迁移→种子幂等→pytest）与 `POSTGRES_DSN` 一致性；新增 `backend/requirements.lock` 依赖锁文件（pip-tools，Dockerfile/CI 以 `--constraint` 应用）；评测 OFFLINE 模式强制禁用 LLM（避免误用真实模型）。CI 云端成功运行需 push 后由 GitHub Actions 执行，仓库未提交故无云端运行记录（如实标注，不以本机等价验证冒充）。
+- V4.3 发布基线（2026-09-01）：V1 完整验收版发布基线收口——评测从"尚未形成正式报告"升级为双模式分表（OFFLINE 确定性 + 真实 LLM，含 P50/P95、Token、成本规则）；观测要求明确为"Langfuse 可选：无凭证安全 no-op、有凭证记录对话/LLM/工具/RAG/领域计算与错误并脱敏，云端未验证时如实标注"；镜像交付要求明确 CPU-only PyTorch（本仓库仅 CPU Embedding，不装 CUDA 运行时）；隔离全新部署验证与 CI 无密钥可运行要求纳入验收范围。
+- V4.2 收口（2026-09-01）：本机收口验收——Docker Compose 容器化启动已实测（7 服务 Up、容器内迁移/种子幂等可重复、api 重启可重复启动）；真实 LLM（DeepSeek）对话验证通过；安全不变量 7 项专项检查全为 0；Embedding 向量路径在容器内实测通过（pgvector 召回+关键词+RRF 融合）；建立可复现黄金集评测入口（参数准确率 0.857、RAG Recall@5=0.8/MRR=0.8/引用正确率 1.0、MAE/WAPE 实测）；修复 Agent 会话连接泄漏、pgvector 检索绑定、seed 后 alembic stamp、db 初始化扩展与 Dockerfile 构建优化。
+- V4.2（2026-08-31）：V1 实现完成——补充实现说明（定时扫描按仓库各建一张待审批计划；种子"交期异常"场景落地为"禁用关系"以满足数据约束），修正"代码尚未实现"状态描述。
 - V4.1（2026-08-31）：定义可复现预测和取整公式、供应商前置选择、数值/哈希规范、决策新鲜度、活动建议防重、人工审批恢复、采购/收货状态机、外部下单恢复、统一幂等和定时逐 SKU 隔离。
 - V4.0（2026-08-31）：确认 V1 完整本机闭环需求。

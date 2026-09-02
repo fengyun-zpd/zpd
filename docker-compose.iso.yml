@@ -1,0 +1,113 @@
+# StockMind 隔离全新部署验证 compose（独立 project、独立卷、不冲突端口）
+# 用途：验证"全新部署"全流程，不触碰 stockmind 主项目的卷与端口。
+name: stockmind-isolate
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: stockmind
+      POSTGRES_PASSWORD: stockmind
+      POSTGRES_DB: stockmind
+    ports:
+      - "15432:5432"
+    volumes:
+      - iso_pgdata:/var/lib/postgresql/data
+      - ./docker/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockmind -d stockmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mock-supplier:
+    build: ./backend
+    command: uvicorn app.mock_supplier.app:app --host 0.0.0.0 --port 8100
+    environment:
+      MOCK_SUPPLIER_STORE_PATH: /data/mock_supplier.json
+      MOCK_SUPPLIER_TIMEOUT_SLEEP: "8"
+    ports:
+      - "18100:8100"
+    volumes:
+      - iso_supplierdata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    command: >
+      sh -c "alembic upgrade head
+      && python -m app.seed.seed
+      && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
+      REDIS_URL: redis://redis:6379/0
+      MOCK_SUPPLIER_URL: http://mock-supplier:8100
+      EMBEDDING_MODEL_NAME: paraphrase-multilingual-MiniLM-L12-v2
+      ORDER_TIMEOUT_SECONDS: "3"
+      # 隔离部署：无外部密钥，验证 OFFLINE 模式与 Langfuse no-op
+      LLM_API_KEY: ""
+      LANGFUSE_PUBLIC_KEY: ""
+      LANGFUSE_SECRET_KEY: ""
+    ports:
+      - "18000:8000"
+    volumes:
+      - iso_hf_cache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-supplier:
+        condition: service_started
+
+  worker:
+    build: ./backend
+    command: celery -A app.tasks.celery_app:celery worker --loglevel=info
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
+      REDIS_URL: redis://redis:6379/0
+      MOCK_SUPPLIER_URL: http://mock-supplier:8100
+      LLM_API_KEY: ""
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build: ./backend
+    command: celery -A app.tasks.celery_app:celery beat --loglevel=info
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
+      REDIS_URL: redis://redis:6379/0
+      LLM_API_KEY: ""
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "13000:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  iso_pgdata:
+  iso_supplierdata:
+  iso_hf_cache:

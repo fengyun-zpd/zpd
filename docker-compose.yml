@@ -1,0 +1,123 @@
+# ============================================================
+# StockMind V1 本机 Docker Compose 闭环
+# 启动：docker compose up -d --build
+# 重置数据：docker compose exec api python -m app.seed.seed --reset
+# ============================================================
+name: stockmind
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: stockmind
+      POSTGRES_PASSWORD: stockmind
+      POSTGRES_DB: stockmind
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 首次初始化时启用 pgvector 扩展（迁移需要 vector 类型）
+      - ./docker/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockmind -d stockmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mock-supplier:
+    build: ./backend
+    command: uvicorn app.mock_supplier.app:app --host 0.0.0.0 --port 8100
+    environment:
+      MOCK_SUPPLIER_STORE_PATH: /data/mock_supplier.json
+      # 超时故障演示：mock 延迟需大于 API 的 ORDER_TIMEOUT_SECONDS 才能进入 order_unknown
+      MOCK_SUPPLIER_TIMEOUT_SLEEP: "8"
+    ports:
+      - "8100:8100"
+    volumes:
+      - supplierdata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    command: >
+      sh -c "alembic upgrade head
+      && python -m app.seed.seed
+      && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
+      REDIS_URL: redis://redis:6379/0
+      MOCK_SUPPLIER_URL: http://mock-supplier:8100
+      EMBEDDING_MODEL_NAME: paraphrase-multilingual-MiniLM-L12-v2
+      # 供应商调用超时（秒）：超时/歧义 -> order_unknown（配合 mock 的 8 秒延迟演示）
+      ORDER_TIMEOUT_SECONDS: "3"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Embedding 模型缓存卷：容器重建后不重复下载（RAG 向量路径）
+      - huggingface-cache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-supplier:
+        condition: service_started
+
+  worker:
+    build: ./backend
+    command: celery -A app.tasks.celery_app:celery worker --loglevel=info
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
+      REDIS_URL: redis://redis:6379/0
+      MOCK_SUPPLIER_URL: http://mock-supplier:8100
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build: ./backend
+    command: celery -A app.tasks.celery_app:celery beat --loglevel=info
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+  supplierdata:
+  huggingface-cache:
