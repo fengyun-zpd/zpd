@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 
 from app.api import governance, knowledge, plans, purchase
 from app.api.errors import register_exception_handlers
@@ -17,6 +17,7 @@ logger = logging.getLogger("stockmind")
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    agent_available = False
     app = FastAPI(
         title="StockMind API",
         version="0.1.0",
@@ -44,7 +45,22 @@ def create_app() -> FastAPI:
     # 对话（LangGraph）路由在 Agent 模块可用后挂载；先注册健康检查
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "env": settings.env}
+        # liveness 只回答进程是否存活；能力状态由 capabilities 暴露，避免
+        # Agent 依赖缺失时把“进程活着”误报成“业务完整可用”。
+        return {
+            "status": "ok",
+            "env": settings.env,
+            "capabilities": {"agent": agent_available},
+        }
+
+    @app.get("/ready")
+    def ready() -> dict:
+        if not agent_available:
+            raise HTTPException(
+                status_code=503,
+                detail={"status": "degraded", "checks": {"agent": False}},
+            )
+        return {"status": "ready", "env": settings.env, "checks": {"agent": True}}
 
     @app.get("/")
     def root() -> dict:
@@ -59,6 +75,7 @@ def create_app() -> FastAPI:
         from app.api.conversations import router as conversations_router
 
         app.include_router(conversations_router)
+        agent_available = True
     except ImportError:  # pragma: no cover
         logger.warning("conversations router 未加载：Agent 模块尚不可用")
 

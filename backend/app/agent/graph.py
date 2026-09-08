@@ -186,7 +186,7 @@ def node_draft(state: AgentState) -> dict:
             level="ERROR",
         )
         # 防重/并发类错误给出明确下一步；其余阻断按错误码提示
-        hint = blocked_line_summary("", exc.code, exc.message)
+        hint = blocked_line_summary("", exc.code, exc.message, exc.detail)
         return {
             "tool_calls": calls,
             "draft_result": None,

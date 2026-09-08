@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api } from "../api/client";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { api, newIdemKey } from "../api/client";
 import { formatBoolean, formatDecimal, formatRuleType, formatScope, shortId } from "../ui/format";
 
 interface DocumentDto {
@@ -25,12 +25,34 @@ interface RuleDto {
   source_chunk_id: string;
 }
 
-export function RuleKnowledge() {
+interface ImportResult {
+  document_id: string;
+  title: string;
+  chunk_count: number;
+  embedding_status: "vector_indexed" | "keyword_only" | "already_indexed";
+  already_exists: boolean;
+}
+
+const DOC_TYPES: Array<{ value: string; label: string }> = [
+  { value: "replenishment_policy", label: "补货策略资料" },
+  { value: "safety_stock", label: "安全库存资料" },
+  { value: "warehouse_rule", label: "仓库作业资料" },
+  { value: "supplier_constraint", label: "供应商约束资料" },
+  { value: "receiving_sop", label: "收货 SOP 资料" },
+];
+
+export function RuleKnowledge({ roles }: { roles: string[] }) {
   const [docs, setDocs] = useState<DocumentDto[]>([]);
   const [rules, setRules] = useState<RuleDto[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Array<{ source_chunk_id: string; document_title: string; content: string; score: number }>>([]);
   const [error, setError] = useState("");
+  const [title, setTitle] = useState("");
+  const [docType, setDocType] = useState(DOC_TYPES[0].value);
+  const [content, setContent] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const canImport = roles.includes("admin");
 
   const load = useCallback(() => {
     api
@@ -58,9 +80,79 @@ export function RuleKnowledge() {
     }
   };
 
+  const importDocument = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!title.trim() || !content.trim() || importing) return;
+    setError("");
+    setImportResult(null);
+    setImporting(true);
+    try {
+      const result = await api.post<ImportResult>(
+        "/api/v1/knowledge/documents/import",
+        {
+          title: title.trim(),
+          doc_type: docType,
+          content: content.trim(),
+          effective_from: new Date().toISOString().slice(0, 10),
+        },
+        newIdemKey()
+      );
+      setImportResult(result);
+      setTitle("");
+      setContent("");
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div className="card">
-      <h2>规则知识库（只读）</h2>
+      <h2>规则知识库</h2>
+      {canImport ? (
+        <form className="knowledge-import" onSubmit={importDocument}>
+          <h3>导入本地资料</h3>
+          <div className="knowledge-import-grid">
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="资料标题"
+              maxLength={256}
+              required
+            />
+            <select value={docType} onChange={(e) => setDocType(e.target.value)}>
+              {DOC_TYPES.map((type) => (
+                <option key={type.value} value={type.value}>
+                  {type.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="粘贴 Markdown 或 TXT 内容（最多 80,000 字符）"
+            maxLength={80_000}
+            required
+          />
+          <div className="knowledge-import-actions">
+            <button type="submit" disabled={importing || !title.trim() || !content.trim()}>
+              {importing ? "导入中…" : "导入并建立检索索引"}
+            </button>
+            <span className="hint">资料仅供检索引用，不会自动修改补货计算规则。</span>
+          </div>
+        </form>
+      ) : (
+        <p className="hint">切换到管理员账号后，可导入本地资料供 Agent 检索引用。</p>
+      )}
+      {importResult && (
+        <p className="success-message">
+          {importResult.already_exists ? "资料已存在，已复用原索引" : "资料导入完成"}：{importResult.title}，共 {importResult.chunk_count} 个检索片段（
+          {importResult.embedding_status === "vector_indexed" ? "向量 + 关键词" : "关键词"}）。
+        </p>
+      )}
       <div className="chat-input">
         <input
           value={query}

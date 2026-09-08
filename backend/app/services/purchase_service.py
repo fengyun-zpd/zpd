@@ -127,6 +127,7 @@ def _write_back(
     *,
     po: PurchaseOrder,
     attempt: PurchaseOrderAttempt,
+    actor_id: str,
     guard: IdempotencyGuard,
     result: SupplierResult,
     request_id: str | None = None,
@@ -174,7 +175,7 @@ def _write_back(
     after = {"status": current.status, "version": current.version}
     write_audit(
         session,
-        actor_id="buyer",
+        actor_id=actor_id,
         action=CMD_PLACE_ORDER,
         entity_type="purchase_order",
         entity_id=current.id,
@@ -210,7 +211,7 @@ def place_order(
     """下达采购单：先持久化 attempt + ordering 并提交，再外呼供应商，最后写回。"""
     from app.services.access import require_roles
 
-    require_roles(session, actor_id, "buyer")
+    require_roles(session, actor_id, "buyer", "admin")
 
     po = session.get(PurchaseOrder, po_id)
     if po is None:
@@ -271,6 +272,7 @@ def place_order(
                 write_session,
                 po=po,
                 attempt=attempt,
+                actor_id=actor_id,
                 guard=guard,
                 result=result,
                 request_id=request_id,
@@ -301,7 +303,7 @@ def query_unknown_order(
     """
     from app.services.access import require_roles
 
-    require_roles(session, actor_id, "buyer", "system")
+    require_roles(session, actor_id, "buyer", "admin", "system")
 
     po = session.get(PurchaseOrder, po_id)
     if po is None:
@@ -432,7 +434,7 @@ def receive_goods(
     """
     from app.services.access import require_roles
 
-    require_roles(session, actor_id, "operator", "buyer")
+    require_roles(session, actor_id, "operator", "buyer", "admin")
 
     if qty <= 0:
         raise ValidationError(f"收货数量必须大于 0，收到 {qty}")
@@ -608,7 +610,7 @@ def close_purchase_order(
     """received -> closed（buyer 明确确认关闭）。"""
     from app.services.access import require_roles
 
-    require_roles(session, actor_id, "buyer")
+    require_roles(session, actor_id, "buyer", "admin")
     po = session.get(PurchaseOrder, po_id)
     if po is None:
         raise NotFoundError(f"采购单不存在 {po_id}")
@@ -660,7 +662,7 @@ def cancel_purchase_order(
     """仅取消尚未开始外部下单的 po_created（需求 6.2：无进行中/未知/成功外部尝试）。"""
     from app.services.access import require_roles
 
-    require_roles(session, actor_id, "buyer")
+    require_roles(session, actor_id, "buyer", "admin")
     po = session.get(PurchaseOrder, po_id)
     if po is None:
         raise NotFoundError(f"采购单不存在 {po_id}")

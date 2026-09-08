@@ -83,6 +83,20 @@ def test_assistant_blocks_duplicate_suggestion(browser):
         # 下一步动作存在（chat-next-step 或阻断详情）
         next_step = page.locator(".chat-next-step").count()
         assert next_step > 0
+        # 被活动建议阻断时，页面必须给出与计划状态匹配的可点击去向。
+        routes = [
+            ("查看待审批建议", "审批箱"),
+            ("前往采购单建单", "采购单"),
+            ("查看现有补货计划", "补货工作台"),
+        ]
+        for label, page_name in routes:
+            jump = page.get_by_role("button", name=label)
+            if jump.count() > 0:
+                jump.first.click()
+                page.wait_for_function(f"() => document.body.textContent.includes('{page_name}')", timeout=15000)
+                break
+        else:
+            raise AssertionError("活动建议阻断未提供有效的计划去向按钮")
         print("防重阻断展示 OK")
     finally:
         page.close()

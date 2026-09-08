@@ -22,7 +22,7 @@ NEXT_STEP: dict[str, tuple[str, str]] = {
     # 防重 / 并发
     "ACTIVE_REPLENISHMENT_EXISTS": (
         "活动建议已存在",
-        "同一仓库/SKU 已有待审批建议，请先在审批箱处理该建议，无需重复发起。",
+        "同一仓库/SKU 已有活动建议。系统会根据关联计划的当前状态提供正确去向；无需重复发起。",
     ),
     "PLAN_STALE": ("决策输入已变化", "审批或建单前检测到输入变化，请查看变化字段；可排除变化明细，或重新生成修订版。"),
     "RESOURCE_BUSY": ("资源忙", "事务锁超时，请稍后以同一幂等键重试。"),
@@ -42,12 +42,39 @@ def next_step(code: str | None) -> tuple[str, str] | None:
     return NEXT_STEP.get(code)
 
 
-def blocked_line_summary(product_id: str, blocked_code: str | None, blocked_reason: str | None) -> dict:
+def blocked_line_summary(
+    product_id: str,
+    blocked_code: str | None,
+    blocked_reason: str | None,
+    detail: dict | None = None,
+) -> dict:
     """构造前端可直接展示的阻断行摘要（含下一步动作）。"""
     hint = next_step(blocked_code)
-    return {
+    summary: dict = {
         "product_id": product_id,
         "blocked_code": blocked_code,
         "blocked_reason": blocked_reason,
         "next_step": hint[1] if hint else "请查看执行记录或联系管理员。",
     }
+    if blocked_code != "ACTIVE_REPLENISHMENT_EXISTS" or not detail:
+        return summary
+
+    # 活动建议既可能正在待审批，也可能已批准、尚未建单。前者才应去审批箱。
+    plan_status = detail.get("plan_status")
+    order_qty = detail.get("order_qty")
+    summary.update(
+        {
+            "plan_id": detail.get("plan_id"),
+            "plan_status": plan_status,
+            "order_qty": order_qty,
+        }
+    )
+    if plan_status == "pending_approval":
+        summary["next_step"] = "已有待审批建议，请在审批箱处理该建议，无需重复发起。"
+    elif plan_status == "approved" and (order_qty or 0) > 0:
+        summary["next_step"] = "关联计划已批准且尚未建单，请前往采购单页面确认并创建采购单。"
+    elif plan_status == "approved":
+        summary["next_step"] = "关联计划已批准，但该 SKU 当前建议数量为 0；请在补货工作台查看计算依据。"
+    else:
+        summary["next_step"] = "关联计划不处于待审批状态，请在补货工作台查看其状态和计算依据。"
+    return summary

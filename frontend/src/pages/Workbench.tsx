@@ -24,10 +24,16 @@ const BLOCK_NEXT_STEP: Record<string, string> = {
   illegal_input: "请先修正基础数据（库存、预留量、交期或规则值不合法）。",
   no_supplier: "请先在供应商关系维护中补充该 SKU 的供应商。",
   data_insufficient: "历史需求覆盖不完整，可按固定安全库存降级或补充数据后重算。",
-  ACTIVE_REPLENISHMENT_EXISTS: "请先在审批箱处理已有活动建议，无需重复发起。",
+  ACTIVE_REPLENISHMENT_EXISTS: "请查看已有活动计划的实际状态后继续处理，无需重复发起。",
 };
 
-export function Workbench({ onSelectPlan }: { onSelectPlan?: (planId: string) => void }) {
+export function Workbench({
+  onSelectPlan,
+  initialPlanId,
+}: {
+  onSelectPlan?: (planId: string) => void;
+  initialPlanId?: string;
+}) {
   const [plans, setPlans] = useState<PlanDto[]>([]);
   const [error, setError] = useState<string>("");
   const [expanded, setExpanded] = useState<Expanded | null>(null);
@@ -40,6 +46,14 @@ export function Workbench({ onSelectPlan }: { onSelectPlan?: (planId: string) =>
   }, []);
 
   useEffect(load, [load]);
+
+  useEffect(() => {
+    if (!initialPlanId || !plans.some((plan) => plan.plan_id === initialPlanId)) return;
+    api
+      .get<PlanDto>(`/api/v1/plans/${initialPlanId}`)
+      .then((d) => setExpanded({ planId: d.plan_id, lines: d.lines || [], error: "" }))
+      .catch((e) => setExpanded({ planId: initialPlanId, lines: [], error: (e as Error).message }));
+  }, [initialPlanId, plans]);
 
   const toggleDetail = (planId: string) => {
     if (expanded?.planId === planId) {

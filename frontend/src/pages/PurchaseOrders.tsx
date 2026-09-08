@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, newIdemKey, PlanDto, PurchaseOrderDto } from "../api/client";
 import { formatQuantity, formatStatus, listLabel, shortId } from "../ui/format";
 
-export function PurchaseOrders() {
+export function PurchaseOrders({ initialPlanId }: { initialPlanId?: string }) {
   const [orders, setOrders] = useState<PurchaseOrderDto[]>([]);
   const [selected, setSelected] = useState("");
   const [detail, setDetail] = useState<PurchaseOrderDto | null>(null);
@@ -75,6 +75,12 @@ export function PurchaseOrders() {
   );
   const zeroOnlyPlans = approvedPlans.filter((p) => (p.purchasable_count ?? 0) === 0 && !p.has_po);
   const alreadyOrderedPlans = approvedPlans.filter((p) => p.has_po);
+
+  useEffect(() => {
+    if (initialPlanId && selectablePlans.some((plan) => plan.plan_id === initialPlanId)) {
+      setCreatePlanId(initialPlanId);
+    }
+  }, [initialPlanId, selectablePlans]);
 
   const createPOs = async () => {
     if (!createPlanId) return;

@@ -11,6 +11,7 @@ import uuid
 import pytest
 
 from app.constants import (
+    CMD_PLACE_ORDER,
     PLAN_APPROVED,
     PLAN_PENDING_APPROVAL,
     PLAN_REJECTED,
@@ -120,7 +121,7 @@ def test_full_closed_loop(db_session, adapter):
     outcome = purchase_service.place_order(
         db_session,
         po_id=po.id,
-        actor_id="dave",
+        actor_id="eve",
         idempotency_key=f"place-{uuid.uuid4().hex}",
         adapter=adapter,
     )
@@ -139,7 +140,7 @@ def test_full_closed_loop(db_session, adapter):
         po_line_id=po_line.id,
         receipt_event_id=f"EVT-{uuid.uuid4().hex}",
         qty=qty // 2,
-        actor_id="bob",
+        actor_id="eve",
         idempotency_key=f"rcv-{uuid.uuid4().hex}",
     )
     db_session.commit()
@@ -149,7 +150,7 @@ def test_full_closed_loop(db_session, adapter):
         po_line_id=po_line.id,
         receipt_event_id=f"EVT-{uuid.uuid4().hex}",
         qty=qty - qty // 2,
-        actor_id="bob",
+        actor_id="eve",
         idempotency_key=f"rcv-{uuid.uuid4().hex}",
     )
     db_session.commit()
@@ -159,7 +160,7 @@ def test_full_closed_loop(db_session, adapter):
     closed = purchase_service.close_purchase_order(
         db_session,
         po_id=po.id,
-        actor_id="dave",
+        actor_id="eve",
         idempotency_key=f"close-{uuid.uuid4().hex}",
     )
     db_session.commit()
@@ -168,6 +169,7 @@ def test_full_closed_loop(db_session, adapter):
     # 审计记录
     audits = db_session.query(AuditLog).filter(AuditLog.entity_id == po.id).all()
     assert len(audits) >= 4
+    assert any(a.action == CMD_PLACE_ORDER and a.actor_id == "eve" for a in audits)
 
 
 def test_plan_stale_on_approval(db_session):
@@ -224,8 +226,12 @@ def test_active_replenishment_dedupe(db_session):
     draft = _draft_e01(db_session)
     db_session.commit()
     assert draft.created is True
-    with pytest.raises(ActiveReplenishmentExistsError):
+    with pytest.raises(ActiveReplenishmentExistsError) as exc_info:
         _draft_e01(db_session)
+    detail = exc_info.value.detail
+    assert detail["plan_id"] == draft.plan_id
+    assert detail["plan_status"] == PLAN_PENDING_APPROVAL
+    assert detail["order_qty"] > 0
     db_session.rollback()
 
 
@@ -429,7 +435,7 @@ def test_order_unknown_then_query_recovery(db_session):
     recovered = purchase_service.query_unknown_order(
         db_session,
         po_id=pos[0].id,
-        actor_id="dave",
+        actor_id="eve",
         idempotency_key=f"query-{uuid.uuid4().hex}",
         adapter=timeout_adapter,
     )
@@ -506,7 +512,7 @@ def test_cancel_guards(db_session):
     cancelled = purchase_service.cancel_purchase_order(
         db_session,
         po_id=pos[0].id,
-        actor_id="dave",
+        actor_id="eve",
         idempotency_key=f"cancel-{uuid.uuid4().hex}",
     )
     db_session.commit()

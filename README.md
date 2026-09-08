@@ -3,6 +3,8 @@
 > 面向中小制造与批发仓库的可审计补货 Agent：Agent 负责理解与编排，确定性领域服务负责
 > 计算与状态，授权人员负责高风险副作用。全部数据为固定随机种子生成的合成演示数据。
 
+> **V1 冻结基线（2026-09-08）**：V1 功能边界、权限边界、状态机、数据模型和演示入口冻结。后续仅接受安全、数据正确性、构建阻塞和文档勘误修复；新增业务能力统一进入 V1.1 或更高版本，并须新增 ADR、测试和评测证据。
+
 ## 1. 快速开始（V1 本机 Docker Compose 闭环）
 
 前置：Docker + Docker Compose。
@@ -19,6 +21,36 @@ docker compose up -d --build
 | Web 工作区 | http://localhost:3000 |
 | API 文档 | http://localhost:8000/docs |
 | 模拟供应商状态 | http://localhost:8100/fault-modes |
+
+### 1.1 面试演示（Windows）
+
+在 Compose 启动后执行以下命令，可复验运行状态并运行权限、状态机和采购闭环核心测试；脚本不会清空数据库：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo_interview.ps1
+```
+
+演示顺序建议为：补货助手发起计划 -> 审批箱批准/排除 -> 工作台核对“可采购/无需采购” -> 采购单按供应商创建 -> 以 `eve` 下达并登记到货 -> 关闭采购单；再切换模拟供应商超时，展示 `order_unknown` 只能查询恢复。演示完成后可在 API 文档查看请求与响应，审计记录保留实际操作者。
+
+只检查正在运行的 Compose 而不重复本地测试时，可追加 `-SkipTests`。
+
+需要隔离端口和数据卷演示完整采购状态机时，使用隔离 Compose（不影响主环境）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo_interview.ps1 -Isolated
+```
+
+需要每次从干净合成数据开始时追加 `-Reset`；它只销毁隔离项目的卷：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo_interview.ps1 -Isolated -Reset
+```
+
+隔离演示入口为 `http://127.0.0.1:13000`，API 文档为 `http://127.0.0.1:18000/docs`。演示结束后清理隔离卷：
+
+```powershell
+docker compose -f docker-compose.iso.yml -p stockmind-interview down -v
+```
 
 首次启动会在空数据库中初始化合成种子；API 重启不会清空已有业务数据。明确重置数据（一键销毁并重建合成种子）时：
 
@@ -41,6 +73,10 @@ docker compose down -v   # 连同数据卷一起清除
   首次运行联网下载（api 容器已挂载 `huggingface-cache` 缓存卷，重建不重复下载）；
   生成向量索引：`docker compose exec api python -m app.seed.seed --with-embeddings`；
   模型不可用时检索退化为关键词路径并记录告警。
+- RAG 知识资料导入：切换到 `admin` 用户，打开“规则知识库”，粘贴经确认的 Markdown/TXT
+  资料并提交。系统会按内容摘要幂等去重、分块建立关键词索引，并在 Embedding 可用时建立
+  向量索引；普通用户只能检索和查看。导入资料仅作为可引用证据，不会直接修改安全库存、预测
+  或补货公式；如要改变计算规则，必须走受控的结构化规则变更流程。
 
 ## 2.2 Langfuse 观测（可选，默认 no-op）
 
@@ -173,6 +209,7 @@ docker compose -f docker-compose.iso.yml down
 - **Embedding 向量路径（已实测）**：容器内安装 [rag] 依赖并下载模型（已挂载 huggingface-cache 缓存卷）；`seed --with-embeddings` 生成 16 条向量；pgvector 余弦召回实测命中（相似度 0.82）；关键词 FTS 与 RRF 混合检索实测命中；提示注入/伪造引用文档被过滤。
 - **黄金集评测（双模式分表，已实测）**：`run_eval.sh` 输出 OFFLINE 与真实 LLM 两份报告（样本量、并发、机器、模型、时间戳如实记录）——参数字段准确率 0.857、必要澄清率 1.0、RAG Recall@5=0.8 / MRR=0.8 / 引用正确率 1.0、MAE=1.32 / WAPE=0.14；OFFLINE 任务完成率 0.667 / 工具调用正确率 0.929（P50 5.7ms）；真实 LLM 任务完成率 0.667 / 工具调用正确率 0.929（P50 1.68s、Token 总量 859=输入 738+输出 121）；成本未配置单价只报 Token。
 - **Langfuse 观测（已实现，mock 已验证，云端未验证）**：无凭证安全 no-op；有凭证记录对话/LLM generation/工具/RAG/领域计算与错误，关联 request/trace/thread/plan id，记录模型名/耗时/Token/状态，对 API Key 与敏感文本脱敏；观测失败不影响业务事务；本地 mock 单测 5 项通过。云端未验证（`.env` 未配置 `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`）——唯一外部阻塞；填写后即可接入。
+- **健康检查分层（已实现）**：`/health` 只表示进程存活并返回 Agent 能力标识；`/ready` 仅在 Agent 路由成功挂载时返回 ready，依赖缺失时稳定返回 503，避免部署探针误把降级服务当作完整业务。
 - **隔离全新部署验证（已实测）**：独立 compose project（`docker-compose.iso.yml`）、独立卷（`stockmind-isolate_*`）、不冲突端口（18000/13000/18100/15432/16379）：全新镜像构建、pgvector 扩展初始化（0.8.6）、`alembic upgrade head` 幂等、种子重复执行幂等、api 重启恢复、Redis/PG/Worker/Beat 连通、OFFLINE 对话、Embedding 16 条向量、HTTP 冒烟闭环（5 张 PO 下达→收货→关闭）、容器 nginx 前端 Playwright E2E、停止后重启全部恢复。
 - CI（无密钥可运行，本轮修复后已本地等价验证）：后端检查（Ruff/格式/Mypy/测试）、
   **迁移内自动启用 pgvector 扩展**、迁移与种子幂等（干净库 alembic→seed×2→alembic→pytest 顺序验证）、
@@ -187,7 +224,8 @@ docker compose -f docker-compose.iso.yml down
 - **计算归属**：规则校验 → 预测 → 选供应商 → 计算补货量，全部确定性服务；
   供应商必须先于补货量选定；LLM 不参与数值计算。
 - **唯一写工具**：LLM 只有"生成补货草稿"；审批/建单/下单/收货/关闭/取消/规则修改/
-  故障切换只允许对应角色或后台任务。
+  故障切换只允许对应角色或后台任务。知识资料导入仅允许 `admin` 通过页面/API 操作，且是
+  证据导入，不改变结构化计算规则。
 - **数据库权威**：计划/审批/采购状态以 PostgreSQL 为准；checkpoint 只恢复会话。
 - **决策新鲜度**：审批与建单前重算 `decision_input_hash`，变化返回 409 `PLAN_STALE`。
 - **防重**：活动建议部分唯一索引、采购单明细 `plan_line_id` 唯一、`receipt_event_id`
@@ -201,7 +239,7 @@ docker compose -f docker-compose.iso.yml down
 
 - 全部数据为固定随机种子生成的合成数据；不声称接入真实 WMS/ERP/供应商，
   不声称产生真实经营收益。
-- V1 只实现需求规格说明书 V4.3 的 V1 范围；V1.1/V2 能力标注为规划中/未实现。
+- V1 只实现需求规格说明书 V4.5 的 V1 范围；V1.1/V2 能力标注为规划中/未实现。
 - 配置 LLM Key 时对话使用真实模型（已实测 DeepSeek）；无 Key 或调用失败时自动回退
   OFFLINE 演示模式（UI 标注 offline）。无 Embedding 模型时向量召回不可用（如实告警），
   关键词检索路径可正常降级。
@@ -210,13 +248,32 @@ docker compose -f docker-compose.iso.yml down
 ## 8. 文档索引
 
 - [V1 使用说明书（小白版）](StockMind使用说明书.md)
-- [需求规格说明书 V4.3](StockMind需求规格说明书.md)
-- [架构设计文档 V4.3](StockMind架构设计文档.md)
-- [ADR 001 修订版 1.3](StockMind架构决策记录ADR001.md)
-- [工作区 Agent 宪法 v1.3](AGENTS.md)
+- [需求规格说明书 V4.6](StockMind需求规格说明书.md)
+- [架构设计文档 V4.6](StockMind架构设计文档.md)
+- [ADR 001 修订版 1.7](StockMind架构决策记录ADR001.md)
+- [工作区 Agent 宪法 v1.5](AGENTS.md)
+
+### 8.1 模块化演进区
+
+新项目远程仓库：<https://github.com/fengyun-zpd/dianshang-shouhou>（当前公开仓库为空，初始化前不宣称已有远程代码）。
+
+`docs/` 将 V1 已验证的确定性补货能力拆成可独立迭代的平台模块，并规划电商售后多智能体工单系统的 V2/V3 演进。入口见 [模块化演进文档](docs/README.md)，其他 Agent 的执行提示词见 [面试叙事与提示词](docs/12_interview/README.md)。
+
+开始分工时直接使用根目录的 [新项目 Agent 启动说明](AGENT_START_HERE.md)。
+
+模块文档中的能力分为“V1 已实现”“V2 规划”“V3 规划”三类；规划内容必须先有 ADR、代码、测试和评测证据，才可升级为已实现。
 
 ## 9. 修订记录
 
+- 2026-09-08：V1 冻结基线生效。冻结现有功能、权限、状态机、数据模型和演示流程；后续新增能力不得直接进入 V1，安全/正确性/构建阻塞修复仍可进入冻结基线。
+
+- 2026-09-07：会话身份收紧——创建会话以 `X-Actor-Id` 为唯一事实源，拒绝请求体身份不一致；读取/发送消息校验 `thread_id` 归属，补上跨演示用户会话访问边界，并新增集成回归测试。
+
+- 2026-09-07：面试级收紧——采购领域服务与 REST API 角色矩阵统一，纯 `admin` 可演示下单、未知订单查询、收货、关闭和取消；下单审计记录真实操作者；新增 `/health` 能力标识与 `/ready` 就绪检查；补充纯管理员集成闭环与健康检查单测。
+
+- 2026-09-04：登记新项目远程 `fengyun-zpd/dianshang-shouhou`；新增 `docs/` 模块化演进文档、ADR 和可直接分配给其他 Agent 的提示词。V1 实现与验收边界不变，售后多 Agent、MCP、Graphiti/Neo4j、微调和 Mule Agent Bridge 标为规划中。
+
+- 2026-09-02：V1 知识库可用性修复——新增管理员 Markdown/TXT 证据资料导入、内容摘要幂等去重、分块关键词/可选向量索引、导入审计和导入后检索验证；普通用户保持只读，资料不会直接修改结构化补货规则；同步使用说明、需求、架构、ADR 与宪法至 V4.4 / ADR 1.4 / v1.4。
 - 2026-09-02：V1 收口修复与验收（第二波）——补货助手缺参澄清业务语言+预算不参与说明+示例按钮；工作台“无需采购/可采购统计”；建单全零计划稳定 422 与重复建单 409 防护、`/plans` 增加可采购/无需采购/已建单统计；审批箱空状态引导；定时任务前端按角色禁用按钮（后端 403 保留）；执行记录默认最近 20 条；测试环境隔离加固。后端 136 passed（新增 7 项）、隔离 E2E 8 passed、真实浏览器 localhost:3000 验收 31 项全过（详情见 `.dev/accept_out.txt`）；7 项安全不变量不变量保持不变（领域规则/状态机/权限边界未改动）。
 - 2026-09-01：V1 发布收口第一轮功能优化——依赖可复现升级为双锁文件（`requirements-rag.lock` 锁定 base+rag、torch 固定 CPU 版 2.6.0+cpu、零 CUDA 依赖）；补货助手与审批箱错误可见性/恢复体验增强（缺参字段、阻断原因+下一步、PLAN_STALE 变化字段、order_unknown 只查询、幂等键区分、对话/LLM/RAG 状态区分）；新增 6 项单元测试与 3 个 Playwright 场景；全套测试 122 项、7 项安全不变量全为 0。
 - 2026-09-01：V1 发布候选审计与 CI 收口——修复 CI 真实阻塞（迁移内启用 pgvector 扩展、compose `env_file: required:false`、密钥扫描不泄露、CI 步骤顺序、`POSTGRES_DSN` 一致性）；新增 `requirements.lock` 依赖锁文件（Dockerfile/CI 以 `--constraint` 应用，torch 仍由官方 CPU 源固定 2.6.0+cpu）；评测脚本 OFFLINE 模式强制禁用 LLM（此前误用真实模型）；本地等价验证 CI backend 全流程与容器业务语义复验通过。

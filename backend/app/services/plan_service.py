@@ -476,6 +476,9 @@ def generate_draft(
     use_guard: bool = True,
 ) -> DraftResult:
     """生成补货草稿并提交待审批（受控草稿工具的唯一入口）。"""
+    from app.services.access import require_roles
+
+    require_roles(session, actor_id, "operator", "approver", "buyer", "admin")
     warehouse = session.get(Warehouse, warehouse_id)
     if warehouse is None:
         raise NotFoundError(f"仓库不存在 {warehouse_id}")
@@ -519,12 +522,17 @@ def generate_draft(
     ).all()
     if trigger_type == "manual" and active:
         line = active[0]
+        existing_plan = session.get(ReplenishmentPlan, line.plan_id)
         raise ActiveReplenishmentExistsError(
             "同一仓库/SKU 已存在活动建议，不能并行创建第二条",
             detail={
                 "plan_id": line.plan_id,
                 "plan_line_id": line.id,
                 "product_id": line.product_id,
+                # 前端必须按实际业务状态决定去向：待审批进入审批箱，
+                # 已批准的正数量明细进入采购单，不能一律指向审批箱。
+                "plan_status": existing_plan.status if existing_plan is not None else None,
+                "order_qty": line.order_qty,
             },
         )
 
@@ -673,6 +681,9 @@ def decide_plan(
     idempotency_key: str = "",
 ) -> ReplenishmentPlan:
     """审批（逐条批准/排除）或整单驳回；手动计划写入持久化 workflow_resume。"""
+    from app.services.access import require_roles
+
+    require_roles(session, actor_id, "approver", "admin")
     plan = session.get(ReplenishmentPlan, plan_id)
     if plan is None:
         raise NotFoundError(f"计划不存在 {plan_id}")
@@ -819,6 +830,9 @@ def create_purchase_orders(
     idempotency_key: str = "",
 ) -> list[PurchaseOrder]:
     """批准明细按供应商聚合创建采购单（全有或全无，需求 5.2 / 6.1）。"""
+    from app.services.access import require_roles
+
+    require_roles(session, actor_id, "buyer", "admin")
     plan = session.get(ReplenishmentPlan, plan_id)
     if plan is None:
         raise NotFoundError(f"计划不存在 {plan_id}")
@@ -944,6 +958,9 @@ def supersede_plan(
     operation_id: str = "",
 ) -> ReplenishmentPlan:
     """创建整单修订版并把旧计划标记 superseded（需求 6.1 / 架构 7.1）。"""
+    from app.services.access import require_roles
+
+    require_roles(session, actor_id, "operator", "approver", "buyer", "admin")
     old = session.get(ReplenishmentPlan, plan_id)
     if old is None:
         raise NotFoundError(f"计划不存在 {plan_id}")

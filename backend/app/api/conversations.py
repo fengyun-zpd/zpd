@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from app.api.deps import RequestContext, get_context
 from app.db import get_session_factory
-from app.errors import StockMindError
+from app.errors import ForbiddenError, NotFoundError, StockMindError
 from app.models.agent import Conversation, Message
 from app.services.access import require_roles
 
@@ -27,7 +27,9 @@ router = APIRouter(prefix="/api/v1", tags=["conversations"])
 
 
 class CreateConversationRequest(BaseModel):
-    actor_id: str
+    """兼容旧客户端；身份以 X-Actor-Id 为唯一事实源。"""
+
+    actor_id: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -38,17 +40,32 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _owned_conversation(session, thread_id: str, actor_id: str) -> Conversation:
+    conv = session.query(Conversation).filter(Conversation.thread_id == thread_id).first()
+    if conv is None:
+        raise NotFoundError(f"会话不存在 {thread_id}")
+    if conv.actor_id != actor_id:
+        raise ForbiddenError("无权访问其他演示用户的会话")
+    return conv
+
+
 @router.post("/conversations")
-def create_conversation(body: CreateConversationRequest) -> dict:
+def create_conversation(
+    ctx: Annotated[RequestContext, Depends(get_context)],
+    body: CreateConversationRequest | None = None,
+) -> dict:
+    """创建当前请求身份的会话；请求体 actor_id 仅为兼容字段，不具备授权作用。"""
     factory = get_session_factory()
     thread_id = uuid.uuid4().hex
     with factory() as session:
-        require_roles(session, body.actor_id, "operator", "approver", "buyer", "admin")
-        session.add(Conversation(thread_id=thread_id, actor_id=body.actor_id))
+        require_roles(session, ctx.actor_id, "operator", "approver", "buyer", "admin")
+        if body and body.actor_id and body.actor_id != ctx.actor_id:
+            raise ForbiddenError("请求体 actor_id 必须与 X-Actor-Id 一致")
+        session.add(Conversation(thread_id=thread_id, actor_id=ctx.actor_id))
         session.commit()
         return {
-            "request_id": uuid.uuid4().hex,
-            "data": {"thread_id": thread_id, "actor_id": body.actor_id},
+            "request_id": ctx.request_id,
+            "data": {"thread_id": thread_id, "actor_id": ctx.actor_id},
         }
 
 
@@ -56,11 +73,8 @@ def create_conversation(body: CreateConversationRequest) -> dict:
 def list_messages(thread_id: str, ctx: Annotated[RequestContext, Depends(get_context)]) -> dict:
     factory = get_session_factory()
     with factory() as session:
-        conv = session.query(Conversation).filter(Conversation.thread_id == thread_id).first()
-        if conv is None:
-            from app.errors import NotFoundError
-
-            raise NotFoundError(f"会话不存在 {thread_id}")
+        require_roles(session, ctx.actor_id, "operator", "approver", "buyer", "admin")
+        conv = _owned_conversation(session, thread_id, ctx.actor_id)
         messages = session.query(Message).filter(Message.conversation_id == conv.id).order_by(Message.created_at).all()
         return {
             "request_id": ctx.request_id,
@@ -78,11 +92,7 @@ async def send_message(
     factory = get_session_factory()
     with factory() as session:
         require_roles(session, ctx.actor_id, "operator", "approver", "buyer", "admin")
-        conv = session.query(Conversation).filter(Conversation.thread_id == thread_id).first()
-        if conv is None:
-            from app.errors import NotFoundError
-
-            raise NotFoundError(f"会话不存在 {thread_id}")
+        conv = _owned_conversation(session, thread_id, ctx.actor_id)
         session.add(Message(conversation_id=conv.id, role="user", content=body.content))
         session.commit()
 

@@ -7,6 +7,9 @@ interface BlockedLine {
   blocked_code?: string;
   blocked_reason?: string;
   next_step?: string;
+  plan_id?: string;
+  plan_status?: string | null;
+  order_qty?: number | null;
 }
 
 interface ChatMessage {
@@ -25,7 +28,7 @@ function getThread(actorId: string): Promise<string> {
   let promise = threadPromises.get(actorId);
   if (!promise) {
     promise = api
-      .post<{ thread_id: string }>("/api/v1/conversations", { actor_id: actorId })
+      .post<{ thread_id: string }>("/api/v1/conversations")
       .then((data) => data.thread_id);
     threadPromises.set(actorId, promise);
   }
@@ -46,7 +49,13 @@ const EXAMPLES: string[] = [
   "帮我检查华南仓 SKU-E08 未来7天库存",
 ];
 
-export function Assistant({ onDraft }: { onDraft?: () => void }) {
+export function Assistant({
+  onDraft,
+  onOpenExistingPlan,
+}: {
+  onDraft?: () => void;
+  onOpenExistingPlan?: (line: BlockedLine) => void;
+}) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -170,6 +179,15 @@ export function Assistant({ onDraft }: { onDraft?: () => void }) {
                   {b.blocked_code ? ` [${formatErrorCode(b.blocked_code)}]` : ""}：{b.blocked_reason}
                 </div>
                 {b.next_step && <div className="chat-next-step">下一步：{b.next_step}</div>}
+                {b.blocked_code === "ACTIVE_REPLENISHMENT_EXISTS" && b.plan_id && onOpenExistingPlan && (
+                  <button type="button" className="secondary-action" onClick={() => onOpenExistingPlan(b)}>
+                    {b.plan_status === "pending_approval"
+                      ? "查看待审批建议"
+                      : b.plan_status === "approved" && (b.order_qty ?? 0) > 0
+                        ? "前往采购单建单"
+                        : "查看现有补货计划"}
+                  </button>
+                )}
               </div>
             ))}
           </div>

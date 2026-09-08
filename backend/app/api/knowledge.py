@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from datetime import date
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import RequestContext, get_context
+from app.api.deps import RequestContext, get_context, require_idempotency_key
 from app.db import get_session_factory
-from app.errors import NotFoundError
+from app.errors import NotFoundError, StockMindError
 from app.models.inventory import Product, Warehouse
 from app.models.knowledge import Chunk, Document
 from app.models.purchasing import Supplier, SupplierProduct
@@ -22,8 +24,25 @@ from app.services.inventory_service import (
     get_inbound_remaining,
     get_quant_summary,
 )
+from app.services.knowledge_import_service import import_evidence_document
 
 router = APIRouter(prefix="/api/v1", tags=["knowledge"])
+
+
+class ImportKnowledgeDocumentRequest(BaseModel):
+    """仅导入检索证据；不把自然语言中的数值转成计算规则。"""
+
+    title: str = Field(min_length=1, max_length=256)
+    doc_type: Literal[
+        "replenishment_policy",
+        "safety_stock",
+        "warehouse_rule",
+        "supplier_constraint",
+        "receiving_sop",
+    ]
+    content: str = Field(min_length=1, max_length=80_000)
+    effective_from: date
+    effective_to: date | None = None
 
 
 @router.get("/knowledge/documents")
@@ -53,6 +72,34 @@ def list_documents(ctx: Annotated[RequestContext, Depends(get_context)]) -> dict
                 for d in rows
             ],
         }
+
+
+@router.post("/knowledge/documents/import")
+def import_knowledge_document(
+    body: ImportKnowledgeDocumentRequest,
+    ctx: Annotated[RequestContext, Depends(get_context)],
+) -> dict:
+    """管理员导入本地 Markdown/TXT 内容，作为 RAG 证据而非业务规则。"""
+    idem_key = require_idempotency_key(ctx)
+    factory = get_session_factory()
+    with factory() as session:
+        try:
+            data = import_evidence_document(
+                session,
+                actor_id=ctx.actor_id,
+                idempotency_key=idem_key,
+                title=body.title,
+                doc_type=body.doc_type,
+                content=body.content,
+                effective_from=body.effective_from,
+                effective_to=body.effective_to,
+                request_id=ctx.request_id,
+            )
+            session.commit()
+        except StockMindError:
+            session.rollback()
+            raise
+        return {"request_id": ctx.request_id, "data": data}
 
 
 @router.get("/rules")

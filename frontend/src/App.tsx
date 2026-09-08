@@ -34,6 +34,8 @@ const NAV: Array<{ key: PageKey; label: string }> = [
 export default function App() {
   const [page, setPage] = useState<PageKey>("assistant");
   const [approvalPlanId, setApprovalPlanId] = useState<string>("");
+  const [workbenchPlanId, setWorkbenchPlanId] = useState<string>("");
+  const [purchasePlanId, setPurchasePlanId] = useState<string>("");
   const [users, setUsers] = useState<UserDto[]>([]);
   const [actor, setActorState] = useState<string>(getActor());
 
@@ -61,6 +63,26 @@ export default function App() {
     setPage("approval");
   };
 
+  const openExistingPlan = (line: {
+    plan_id?: string;
+    plan_status?: string | null;
+    order_qty?: number | null;
+  }) => {
+    if (!line.plan_id) {
+      setPage("workbench");
+      return;
+    }
+    if (line.plan_status === "pending_approval") {
+      openPlanForApproval(line.plan_id);
+    } else if (line.plan_status === "approved" && (line.order_qty ?? 0) > 0) {
+      setPurchasePlanId(line.plan_id);
+      setPage("purchase");
+    } else {
+      setWorkbenchPlanId(line.plan_id);
+      setPage("workbench");
+    }
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -79,13 +101,15 @@ export default function App() {
         ))}
       </nav>
       <main className="content">
-        {page === "assistant" && <Assistant onDraft={refresh} />}
-        {page === "workbench" && <Workbench onSelectPlan={openPlanForApproval} />}
+        {page === "assistant" && <Assistant onDraft={refresh} onOpenExistingPlan={openExistingPlan} />}
+        {page === "workbench" && (
+          <Workbench onSelectPlan={openPlanForApproval} initialPlanId={workbenchPlanId} />
+        )}
         {page === "approval" && <ApprovalBox onChanged={refresh} initialPlanId={approvalPlanId} />}
-        {page === "purchase" && <PurchaseOrders />}
+        {page === "purchase" && <PurchaseOrders initialPlanId={purchasePlanId} />}
         {page === "schedules" && <Schedules roles={currentRoles} />}
         {page === "executions" && <Executions />}
-        {page === "knowledge" && <RuleKnowledge />}
+        {page === "knowledge" && <RuleKnowledge roles={currentRoles} />}
         {page === "data" && <DataView />}
       </main>
     </div>

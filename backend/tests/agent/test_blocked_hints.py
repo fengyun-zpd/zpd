@@ -50,10 +50,41 @@ def test_blocked_line_unknown_code_fallback():
     assert s["next_step"]  # 兜底文案存在
 
 
-def test_active_suggestion_next_step_points_to_approval():
-    """活动建议已存在的下一步必须是'去审批箱处理'，而非重复发起。"""
+def test_active_suggestion_next_step_without_plan_context_is_not_a_false_approval_link():
+    """无计划状态时不把活动建议误说成一定在审批箱。"""
     _, action = next_step("ACTIVE_REPLENISHMENT_EXISTS")
-    assert "审批箱" in action
+    assert "活动建议" in action
+
+
+def test_active_suggestion_summary_routes_pending_plan_to_approval():
+    summary = blocked_line_summary(
+        "SKU-E01",
+        "ACTIVE_REPLENISHMENT_EXISTS",
+        "存在活动建议",
+        {"plan_id": "plan-pending", "plan_status": "pending_approval", "order_qty": 12},
+    )
+    assert summary["plan_id"] == "plan-pending"
+    assert "审批箱" in summary["next_step"]
+
+
+def test_active_suggestion_summary_routes_approved_order_to_purchase():
+    summary = blocked_line_summary(
+        "SKU-E01",
+        "ACTIVE_REPLENISHMENT_EXISTS",
+        "存在活动建议",
+        {"plan_id": "plan-approved", "plan_status": "approved", "order_qty": 12},
+    )
+    assert "采购单" in summary["next_step"]
+
+
+def test_active_suggestion_summary_explains_zero_quantity_approved_plan():
+    summary = blocked_line_summary(
+        "SKU-E01",
+        "ACTIVE_REPLENISHMENT_EXISTS",
+        "存在活动建议",
+        {"plan_id": "plan-zero", "plan_status": "approved", "order_qty": 0},
+    )
+    assert "工作台" in summary["next_step"]
 
 
 def test_external_unknown_forbids_blind_retry():
