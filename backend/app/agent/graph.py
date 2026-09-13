@@ -6,9 +6,13 @@ classify -> clarify | gather_evidence -> draft(interrupt) -> finalize
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
+import threading
 from contextlib import suppress
+from functools import wraps
 
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
@@ -23,11 +27,185 @@ from app.errors import StockMindError
 logger = logging.getLogger("stockmind.agent.graph")
 
 
+def _llm_mode() -> str:
+    """LLM 运行模式：auto（默认）/ llm（评测真实路径）/ offline（强制离线）。"""
+    return (get_settings().llm_mode or "auto").strip().lower()
+
+
+def _llm_configured() -> bool:
+    """真实 LLM 配置是否完整（Key / Base URL / Model 三者齐备）。"""
+    s = get_settings()
+    return bool(s.llm_api_key and s.llm_base_url and s.llm_model)
+
+
 def _llm_enabled() -> bool:
-    return bool(get_settings().llm_api_key)
+    """是否应尝试调用真实 LLM。
+
+    - ``offline``：从不调用外部模型（评测确定性基线，强制离线）；
+    - ``llm``：评测真实模型路径，必须配置完整；配置不完整时由 ``node_classify``
+      记录 ``LLM_NOT_CONFIGURED`` 并回退 OFFLINE，不发起请求也不假装调用成功；
+    - ``auto``（默认）：配置完整才优先真实 LLM，失败后回退 OFFLINE 并记录原因。
+    """
+    if _llm_mode() == "offline":
+        return False
+    return _llm_configured()
 
 
 # ---------------------------------------------------------------- 节点
+
+# 步数/循环门禁触发时的稳定业务语言（此后不再调用任何工具）
+ESCALATE_RESPONSE = "任务步骤超过安全上限，已停止自动处理，请转人工处理。"
+
+
+def _canonical_args(args: dict) -> str:
+    """工具参数规范化：key 升序 + 紧凑分隔符，保证同参数生成同一 key。"""
+    return json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _tool_key(tool_name: str, args: dict) -> str:
+    """重复检测 key = 工具名 + 规范化参数（不同参数不会被误判为重复）。"""
+    return f"{tool_name}|{_canonical_args(args)}"
+
+
+def _tool_result_size(result: object) -> int | None:
+    """工具结果规模（条目数 / 字段数），用于语义追踪，**不记录结果内容**。"""
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        for key in ("warehouses", "products", "candidates", "days", "hits", "lines"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return len(value)
+        return len(result)
+    if isinstance(result, list):
+        return len(result)
+    return None
+
+
+_TOOL_ARG_SUMMARY_LIMIT = 40
+
+
+def _tool_args_summary(args: dict) -> dict:
+    """工具参数摘要：键 + 截断后的短值（不记录完整载荷与敏感文本）。"""
+    summary: dict = {}
+    for key, value in args.items():
+        text = "" if value is None else str(value)
+        summary[key] = text[:_TOOL_ARG_SUMMARY_LIMIT] + ("…" if len(text) > _TOOL_ARG_SUMMARY_LIMIT else "")
+    return summary
+
+
+def _guarded_tool_call(*, name: str, args: dict, calls: list[dict], counts: dict, limit: int, fn):
+    """统一的工具重复调用门禁（只读工具与受控写工具 ``generate_draft`` 共用）。
+
+    key = 工具名 + canonical JSON 参数；**先递增计数再判定**，超过 ``limit`` 时
+    **不执行** ``fn``（因此不产生任何业务副作用），返回 ``(None, True)`` 表示被拦截。
+    成功调用会写入 ``calls`` 审计（参数为规范化后的 key 参数）。
+
+    每次调用都写一条语义 span（工具名 / 参数摘要 / 计数 / 结果规模 / 稳定错误码），
+    供决策链追踪；span 只记摘要，不记完整结果、完整 Prompt 或密钥。
+    """
+    from app.observability import record_span
+
+    key = _tool_key(name, args)
+    counts[key] = int(counts.get(key, 0)) + 1
+    summary = _tool_args_summary(args)
+    if counts[key] > limit:
+        logger.warning("工具重复调用超限转人工：tool=%s count=%s limit=%s", name, counts[key], limit)
+        record_span(
+            name="agent.tool",
+            input_={"tool": name, "args": summary},
+            metadata={
+                "tool": name,
+                "count": counts[key],
+                "limit": limit,
+                "error_code": "TOOL_DUPLICATE_BLOCKED",
+            },
+            level="WARNING",
+        )
+        return None, True
+    try:
+        result = fn()
+    except Exception as exc:  # noqa: BLE001 失败也要留 trace，再按原样抛出
+        record_span(
+            name="agent.tool",
+            input_={"tool": name, "args": summary},
+            metadata={"tool": name, "count": counts[key], "error_code": type(exc).__name__},
+            level="ERROR",
+        )
+        raise
+    tools.record(calls, name, args, result)
+    record_span(
+        name="agent.tool",
+        input_={"tool": name, "args": summary},
+        output={"result_size": _tool_result_size(result)},
+        metadata={"tool": name, "count": counts[key], "result_size": _tool_result_size(result)},
+    )
+    return result, False
+
+
+def _with_guard(node_name: str, fn):
+    """节点统一守卫：进入即记步数；超上限或已 loop_blocked 时短路为 escalate。
+
+    短路时**不执行**节点实际工作，因此不会继续调用只读工具或 ``generate_draft``。
+    步数取自 state（由 checkpoint 恢复），重连不会丢失计数。
+
+    ``node_name`` 必须是**图节点名**（如 ``classify``）而不是函数名（``node_classify``），
+    以便语义追踪与 LangGraph 图结构对齐。
+    """
+
+    @wraps(fn)
+    def wrapped(state: AgentState) -> dict:
+        from app.observability import record_span
+
+        count = int(state.get("step_count", 0) or 0) + 1
+        limit = int(get_settings().agent_max_steps)
+        blocked = bool(state.get("loop_blocked"))
+        if blocked or count > limit:
+            logger.warning(
+                "Agent 门禁触发转人工：node=%s step=%s limit=%s loop_blocked=%s",
+                node_name,
+                count,
+                limit,
+                blocked,
+            )
+            record_span(
+                name="agent.node",
+                input_={"node": node_name},
+                metadata={
+                    "node": node_name,
+                    "step_count": count,
+                    "limit": limit,
+                    "escalated": True,
+                    "loop_blocked": blocked,
+                },
+                level="WARNING",
+            )
+            return {
+                "step_count": count,
+                "loop_blocked": True,
+                "outcome": "escalated",
+                "needs_approval": False,
+                "response": ESCALATE_RESPONSE,
+            }
+        update = dict(fn(state) or {})
+        update["step_count"] = count
+        # 节点级语义追踪：记录节点执行顺序（node + step_count）与节点产出的 outcome
+        record_span(
+            name="agent.node",
+            input_={"node": node_name},
+            output={"outcome": update.get("outcome")},
+            metadata={
+                "node": node_name,
+                "step_count": count,
+                "outcome": update.get("outcome"),
+                "intent": update.get("intent"),
+                "degradation_reason": update.get("degradation_reason"),
+                "loop_blocked": bool(update.get("loop_blocked")),
+            },
+        )
+        return update
+
+    return wrapped
 
 
 def node_classify(state: AgentState) -> dict:
@@ -35,6 +213,13 @@ def node_classify(state: AgentState) -> dict:
     from app.db import get_session_factory
 
     factory = get_session_factory()
+    mode = _llm_mode()
+    # 降级原因必须显式记录（不允许静默降级）：offline 是主动选择，其余是真实降级。
+    degradation_reason: str | None = None
+    if mode == "offline":
+        degradation_reason = "LLM_MODE_OFFLINE"
+    elif not _llm_configured():
+        degradation_reason = "LLM_NOT_CONFIGURED"
     result: dict = {
         "intent": "other",
         "params": {},
@@ -42,6 +227,7 @@ def node_classify(state: AgentState) -> dict:
         "clarification": None,
         "offline": not _llm_enabled(),
         "budget_note": False,
+        "degradation_reason": degradation_reason,
     }
     with factory() as session:
         parsed = offline.parse_params(text, session)
@@ -55,9 +241,9 @@ def node_classify(state: AgentState) -> dict:
             }
         )
         if _llm_enabled():
-            try:
-                from app.agent.llm import llm_parse_params
+            from app.agent.llm import LLMError, llm_parse_params
 
+            try:
                 llm_result = llm_parse_params(text)
                 result["intent"] = llm_result.get("intent", parsed.intent)
                 # 归一化商品范围：分类名展开为具体 SKU（LLM 返回"紧固件"等分类时）
@@ -72,9 +258,16 @@ def node_classify(state: AgentState) -> dict:
                 result["missing_params"] = missing
                 result["clarification"] = llm_result.get("clarification")
                 result["offline"] = False
-            except Exception as exc:  # noqa: BLE001 LLM 不可用时回退离线
-                logger.warning("LLM 解析失败，回退离线模式: %s", exc)
+                result["degradation_reason"] = None
+            except LLMError as exc:
+                # 稳定降级原因：LLM_TIMEOUT / LLM_INVALID_RESPONSE / LLM_UNAVAILABLE / LLM_NOT_CONFIGURED
+                logger.warning("真实 LLM 失败（%s），回退 OFFLINE: %s", exc.code, exc)
                 result["offline"] = True
+                result["degradation_reason"] = exc.code
+            except Exception as exc:  # noqa: BLE001 未分类异常也回退，但不得静默
+                logger.warning("LLM 解析异常，回退 OFFLINE: %s", exc)
+                result["offline"] = True
+                result["degradation_reason"] = "LLM_UNAVAILABLE"
     return result
 
 
@@ -98,12 +291,24 @@ def _expand_products(session, products: list[str]) -> list[str]:
 
 
 def route_after_classify(state: AgentState) -> str:
+    if state.get("outcome") == "escalated":
+        return "escalate"
     intent = state.get("intent", "other")
     if intent != "replenish":
         return "respond"
     if state.get("missing_params"):
         return "clarify"
     return "gather_evidence"
+
+
+def route_after_evidence(state: AgentState) -> str:
+    """证据节点后：门禁触发则转人工，否则进入受控草稿。"""
+    return "escalate" if state.get("outcome") == "escalated" else "draft"
+
+
+def route_after_draft(state: AgentState) -> str:
+    """草稿节点后：门禁触发则转人工，否则进入审批等待点。"""
+    return "escalate" if state.get("outcome") == "escalated" else "wait"
 
 
 def node_clarify(state: AgentState) -> dict:
@@ -128,56 +333,135 @@ def node_clarify(state: AgentState) -> dict:
 
 
 def node_gather_evidence(state: AgentState) -> dict:
-    """只读工具编排：库存、在途、供应商关系、规则候选（证据，不进计算）。"""
+    """只读工具编排：库存、在途、供应商关系、规则候选（证据，不进计算）。
+
+    同一会话内「同一工具 + 同一规范化参数」重复超过 ``AGENT_TOOL_DUPLICATE_LIMIT``
+    时：写告警日志、置 ``loop_blocked``、停止后续工具调用并转人工（不再调用工具）。
+    不同参数不会被误判为重复（key 含规范化参数）。
+    """
     from app.observability import record_span
 
     params = state.get("params", {})
     warehouse_id = params.get("warehouse_id")
     products = list(params.get("products", []) or [])
     calls = list(state.get("tool_calls", []))
+    counts: dict = dict(state.get("tool_call_counts", {}) or {})
+    limit = int(get_settings().agent_tool_duplicate_limit)
+    loop_blocked = False
+
+    def _call(name: str, args: dict, fn):
+        """受门禁保护的工具调用：先计数判定，超限则不执行并置 loop_blocked。"""
+        nonlocal loop_blocked
+        result, blocked = _guarded_tool_call(
+            name=name, args=args, calls=calls, counts=counts, limit=limit, fn=fn
+        )
+        if blocked:
+            loop_blocked = True
+        return result
+
     for pid in products:
         assert isinstance(warehouse_id, str)  # 路由已保证必要参数完整
-        tools.record(
-            calls,
+        _call(
             "get_inventory",
             {"warehouse_id": warehouse_id, "product_id": pid},
-            tools.get_inventory(warehouse_id, pid),
+            lambda pid=pid: tools.get_inventory(warehouse_id, pid),
         )
-        tools.record(calls, "get_supplier_options", {"product_id": pid}, tools.get_supplier_options(pid))
-        tools.record(
-            calls,
-            "get_demand_history",
-            {"warehouse_id": warehouse_id, "product_id": pid},
-            tools.get_demand_history(warehouse_id, pid),
-        )
-    evidence = tools.search_rules(f"安全库存 补货 规则 {warehouse_id}")
-    tools.record(calls, "search_rules", {"query": "安全库存 补货 规则"}, evidence)
+        if not loop_blocked:
+            _call(
+                "get_supplier_options",
+                {"product_id": pid},
+                lambda pid=pid: tools.get_supplier_options(pid),
+            )
+        if not loop_blocked:
+            _call(
+                "get_demand_history",
+                {"warehouse_id": warehouse_id, "product_id": pid},
+                lambda pid=pid: tools.get_demand_history(warehouse_id, pid),
+            )
+        if loop_blocked:
+            break
+
+    if loop_blocked:
+        return {
+            "tool_calls": calls,
+            "tool_call_counts": counts,
+            "loop_blocked": True,
+            "outcome": "escalated",
+            "response": ESCALATE_RESPONSE,
+        }
+
+    query = "安全库存 补货 规则"
+    # 计数参数与实际检索上下文一致（含仓库与商品范围）：
+    # 否则不同请求共用固定 query，会被误判成"相同工具相同参数"的重复调用。
+    search_args = {"query": query, "warehouse_id": warehouse_id, "products": products}
+    evidence = _call("search_rules", search_args, lambda: tools.search_rules(f"{query} {warehouse_id}"))
+    if loop_blocked or evidence is None:
+        return {
+            "tool_calls": calls,
+            "tool_call_counts": counts,
+            "loop_blocked": True,
+            "outcome": "escalated",
+            "response": ESCALATE_RESPONSE,
+        }
+    hits = evidence.get("hits", []) or []
     record_span(
         name="rag.search_rules",
-        input_={"query": "安全库存 补货 规则", "warehouse_id": warehouse_id},
-        output={"hit_count": len(evidence.get("hits", []))},
-        metadata={"products": products},
+        input_={"query": query, "warehouse_id": warehouse_id},
+        output={"hit_count": len(hits)},
+        metadata={
+            "products": products,
+            # RAG 引用的文档块 ID（可追溯证据）；无命中时记录空列表与 has_evidence=false，不虚构 citation
+            "cited_source_chunk_ids": [h.get("source_chunk_id") for h in hits],
+            "cited_document_ids": sorted({h.get("document_id") for h in hits if h.get("document_id")}),
+            "has_evidence": bool(hits),
+        },
     )
-    return {"tool_calls": calls, "rule_evidence": evidence.get("hits", [])}
+    return {
+        "tool_calls": calls,
+        "tool_call_counts": counts,
+        "rule_evidence": evidence.get("hits", []),
+    }
 
 
 def node_draft(state: AgentState) -> dict:
-    """受控草稿工具：领域服务校验并落库；提交待审批后 interrupt 暂停会话。"""
+    """受控草稿工具：领域服务校验并落库；提交待审批后 interrupt 暂停会话。
+
+    该**写工具与只读工具共用同一重复调用门禁**（key = 工具名 + canonical JSON 参数）：
+    同一会话中相同参数超过 ``AGENT_TOOL_DUPLICATE_LIMIT`` 时**不执行**领域服务
+    （因此不产生新的业务副作用），置 ``loop_blocked`` 并转人工；被拦截时状态中不保留
+    任何看似成功的草稿 / 计划结果。计数随 state 写入 checkpoint，断线续传不重置。
+    """
     from app.agent.blocked_hints import blocked_line_summary
     from app.observability import record_span
 
     params = state.get("params", {})
     calls = list(state.get("tool_calls", []))
+    counts: dict = dict(state.get("tool_call_counts", {}) or {})
+    limit = int(get_settings().agent_tool_duplicate_limit)
+    # key 参数规范化：products 排序，保证「同一集合不同顺序」被视为同一请求
+    key_args = {
+        "actor_id": state.get("actor_id"),
+        "warehouse_id": params["warehouse_id"],
+        "products": sorted(params["products"]),
+        "requested_window": params["requested_window"],
+    }
     try:
-        draft = tools.generate_draft(
-            actor_id=state.get("actor_id", "operator"),
-            warehouse_id=params["warehouse_id"],
-            products=params["products"],
-            requested_window=params["requested_window"],
-            thread_id=state.get("thread_id"),
+        draft, blocked = _guarded_tool_call(
+            name="generate_draft",
+            args=key_args,
+            calls=calls,
+            counts=counts,
+            limit=limit,
+            fn=lambda: tools.generate_draft(
+                actor_id=state.get("actor_id", "operator"),
+                warehouse_id=params["warehouse_id"],
+                products=params["products"],
+                requested_window=params["requested_window"],
+                thread_id=state.get("thread_id"),
+            ),
         )
     except StockMindError as exc:
-        tools.record(calls, "generate_draft", params, None, exc.message)
+        tools.record(calls, "generate_draft", key_args, None, exc.message)
         record_span(
             name="domain.generate_draft",
             input_=params,
@@ -189,12 +473,26 @@ def node_draft(state: AgentState) -> dict:
         hint = blocked_line_summary("", exc.code, exc.message, exc.detail)
         return {
             "tool_calls": calls,
+            "tool_call_counts": counts,
             "draft_result": None,
             "outcome": "blocked",
             "blocked_lines": [hint],
             "response": f"无法生成草稿：{exc.message}。下一步：{hint['next_step']}",
         }
-    tools.record(calls, "generate_draft", params, draft)
+
+    if blocked:
+        # 门禁拦截：领域服务未被调用，不残留草稿 / 计划结果，统一转人工
+        return {
+            "tool_calls": calls,
+            "tool_call_counts": counts,
+            "loop_blocked": True,
+            "outcome": "escalated",
+            "draft_result": None,
+            "plan_id": None,
+            "needs_approval": False,
+            "response": ESCALATE_RESPONSE,
+        }
+
     record_span(
         name="domain.generate_draft",
         input_=params,
@@ -211,6 +509,7 @@ def node_draft(state: AgentState) -> dict:
         reason = "；".join(f"{o['product_id']}: {o['blocked_reason']}" for o in blocked) if blocked else "无有效明细"
         return {
             "tool_calls": calls,
+            "tool_call_counts": counts,
             "draft_result": draft,
             "outcome": "blocked",
             "blocked_lines": summaries,
@@ -222,6 +521,7 @@ def node_draft(state: AgentState) -> dict:
         response += "\n" + offline.BUDGET_NOTE
     return {
         "tool_calls": calls,
+        "tool_call_counts": counts,
         "draft_result": draft,
         "plan_id": draft["plan_id"],
         "needs_approval": True,
@@ -286,6 +586,26 @@ def node_respond(state: AgentState) -> dict:
     return {"response": response, "outcome": "answered"}
 
 
+def node_escalate(state: AgentState) -> dict:
+    """转人工出口：步数超限或工具重复调用超限时的稳定终止节点。
+
+    只返回业务语言与稳定 ``outcome``，不再调用任何工具，也不产生业务副作用。
+    """
+    reason = "tool_duplicate" if state.get("loop_blocked") else "max_steps"
+    logger.warning(
+        "Agent 转人工：reason=%s step_count=%s limit=%s",
+        reason,
+        state.get("step_count"),
+        get_settings().agent_max_steps,
+    )
+    return {
+        "outcome": "escalated",
+        "needs_approval": False,
+        "loop_blocked": True,
+        "response": ESCALATE_RESPONSE,
+    }
+
+
 def _query_response(text: str) -> str:
     """通用库存查询：解析文本中的仓库别名与 SKU，返回该 SKU 当前库存业务信息。
 
@@ -317,25 +637,42 @@ def _query_response(text: str) -> str:
 
 def build_graph():
     builder = StateGraph(AgentState)
-    builder.add_node("classify", node_classify)
-    builder.add_node("clarify", node_clarify)
-    builder.add_node("gather_evidence", node_gather_evidence)
-    builder.add_node("draft", node_draft)
-    builder.add_node("wait", node_wait)
-    builder.add_node("finalize", node_finalize)
-    builder.add_node("respond", node_respond)
+    # 除 escalate 外的节点统一加门禁包装：进入即记步数，超限/循环时短路转人工
+    builder.add_node("classify", _with_guard("classify", node_classify))
+    builder.add_node("clarify", _with_guard("clarify", node_clarify))
+    builder.add_node("gather_evidence", _with_guard("gather_evidence", node_gather_evidence))
+    builder.add_node("draft", _with_guard("draft", node_draft))
+    builder.add_node("wait", _with_guard("wait", node_wait))
+    builder.add_node("finalize", _with_guard("finalize", node_finalize))
+    builder.add_node("respond", _with_guard("respond", node_respond))
+    # escalate 是终端稳定出口，不再包装（避免被短路逻辑覆盖其自身日志）
+    builder.add_node("escalate", node_escalate)
     builder.add_edge(START, "classify")
     builder.add_conditional_edges(
         "classify",
         route_after_classify,
-        {"clarify": "clarify", "gather_evidence": "gather_evidence", "respond": "respond"},
+        {
+            "clarify": "clarify",
+            "gather_evidence": "gather_evidence",
+            "respond": "respond",
+            "escalate": "escalate",
+        },
+    )
+    builder.add_conditional_edges(
+        "gather_evidence",
+        route_after_evidence,
+        {"draft": "draft", "escalate": "escalate"},
+    )
+    builder.add_conditional_edges(
+        "draft",
+        route_after_draft,
+        {"wait": "wait", "escalate": "escalate"},
     )
     builder.add_edge("clarify", END)
     builder.add_edge("respond", END)
-    builder.add_edge("gather_evidence", "draft")
-    builder.add_edge("draft", "wait")
     builder.add_edge("wait", "finalize")
     builder.add_edge("finalize", END)
+    builder.add_edge("escalate", END)
     return builder.compile(checkpointer=_build_checkpointer(_checkpoint_conn))
 
 
@@ -450,6 +787,9 @@ def run_turn(thread_id: str, actor_id: str, user_input: str) -> tuple[dict, bool
         "user_input": user_input,
         "tool_calls": [],
         "rule_evidence": [],
+        # 每个新 turn 重置步数（避免多轮对话累积被误判超限）；
+        # tool_call_counts 不重置：同一会话的工具重复计数跨 turn 累积（由 checkpoint 保存）。
+        "step_count": 0,
     }
     with turn_trace(
         name="agent.turn",
@@ -482,11 +822,262 @@ def run_turn(thread_id: str, actor_id: str, user_input: str) -> tuple[dict, bool
                 "plan_id": result.get("plan_id"),
                 "interrupted": interrupted,
                 "offline": result.get("offline"),
+                "degradation_reason": result.get("degradation_reason"),
+                "step_count": result.get("step_count"),
+                "loop_blocked": result.get("loop_blocked"),
                 "tool_count": len(result.get("tool_calls", [])),
             },
         )
         flush()
         return result, interrupted
+
+
+def _node_summary(node: str, acc: dict) -> dict:
+    """节点完成时的轻量摘要（供 SSE node_end 展示进度与门禁状态）。"""
+    summary: dict = {"node": node, "step_count": acc.get("step_count")}
+    if node == "classify":
+        summary["intent"] = acc.get("intent")
+        summary["offline"] = acc.get("offline")
+        summary["degradation_reason"] = acc.get("degradation_reason")
+    elif node == "gather_evidence":
+        summary["tool_count"] = len(acc.get("tool_calls", []))
+    elif node == "draft":
+        draft = acc.get("draft_result")
+        if draft and draft.get("created"):
+            summary["created"] = True
+            summary["plan_id"] = draft.get("plan_id")
+        else:
+            summary["outcome"] = acc.get("outcome", "blocked")
+    elif node == "wait":
+        summary["interrupted"] = bool(acc.get("needs_approval"))
+    if acc.get("loop_blocked"):
+        summary["loop_blocked"] = True
+    return summary
+
+
+def _events_from_chunk(chunk: dict, acc: dict, seen: list[int]):
+    """把一个 ``graph.stream`` chunk 转成 ``(event, data)`` 序列。
+
+    原地更新 ``acc``（累积状态）与 ``seen[0]``（tool_call 增量游标）。
+    """
+    if "__interrupt__" in chunk:
+        # wait 节点 interrupt：draft 节点的状态已写入 acc
+        if acc.get("needs_approval"):
+            yield "interrupted", {
+                "status": "pending_approval",
+                "plan_id": acc.get("plan_id"),
+                "step_count": acc.get("step_count"),
+            }
+        return
+    for node, update in chunk.items():
+        if not isinstance(update, dict):
+            continue
+        acc.update(update)
+        # 工具调用增量（gather_evidence 节点逐个写入）
+        calls = acc.get("tool_calls", [])
+        while seen[0] < len(calls):
+            yield "tool_call", calls[seen[0]]
+            seen[0] += 1
+        if node == "draft":
+            draft = acc.get("draft_result")
+            if draft and draft.get("created"):
+                yield "draft_created", {"plan_id": draft.get("plan_id")}
+        yield "node_end", _node_summary(node, acc)
+
+
+async def _astream_graph(
+    *,
+    thread_id: str,
+    actor_id: str | None,
+    graph_input,
+    acc_init: dict | None,
+    trace_name: str,
+    trace_meta: dict,
+    tags: list[str],
+    trace_input: str | None = None,
+    startup_event: tuple[str, dict] | None = None,
+):
+    """内部：把 ``graph.astream`` 的事件流转成 ``(event, data)`` 供 SSE 层消费。
+
+    统一进入 ``turn_trace`` 并在结束时 ``flush``（无凭证时安全 no-op）。异常记入
+    观测后继续抛出，由传输层（``app.streaming.stream_agent_turn``）转为 error + done。
+    """
+    from app.observability import flush, mark_error, record_span, turn_trace
+
+    graph = get_graph()
+    config = {"configurable": {"thread_id": thread_id}}
+    acc: dict = dict(acc_init or {})
+    seen = [0]
+
+    with turn_trace(
+        name=trace_name,
+        thread_id=thread_id,
+        actor_id=actor_id,
+        input_=trace_input,
+        metadata=trace_meta,
+        tags=tags,
+    ):
+        try:
+            if startup_event is not None:
+                yield startup_event
+
+            # 同步 checkpointer（PostgresSaver）不支持异步 API（aget_tuple -> NotImplementedError），
+            # 因此在工作线程执行同步 graph.stream，chunk 经 asyncio.Queue 桥接到本异步生成器：
+            # 既不阻塞事件循环，也不需要维护异步连接池。
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+            end_marker = object()
+
+            def _produce() -> None:
+                try:
+                    for chunk in graph.stream(graph_input, config=config):
+                        loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
+                except BaseException as exc:  # noqa: BLE001 交由消费端按原类型抛出
+                    loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, (end_marker, None))
+
+            threading.Thread(
+                target=_produce,
+                name=f"agent-stream-{thread_id[:8]}",
+                daemon=True,
+            ).start()
+
+            while True:
+                kind, payload = await queue.get()
+                if kind is end_marker:
+                    break
+                if kind == "error":
+                    raise payload
+                for event, data in _events_from_chunk(payload, acc, seen):
+                    yield event, data
+        except GraphInterrupt:  # pragma: no cover 版本兼容兜底（部分版本抛异常而非 __interrupt__ chunk）
+            if acc.get("needs_approval"):
+                yield "interrupted", {
+                    "status": "pending_approval",
+                    "plan_id": acc.get("plan_id"),
+                    "step_count": acc.get("step_count"),
+                }
+        except Exception as exc:  # noqa: BLE001 记录观测后继续抛出（不掩盖业务错误）
+            mark_error(f"{type(exc).__name__}: {exc}")
+            record_span(name="agent.error", metadata={"error": str(exc)[:500]}, level="ERROR")
+            raise
+        finally:
+            flush()
+
+        interrupted = bool(acc.get("needs_approval"))
+        record_span(
+            name="agent.turn.summary",
+            metadata={
+                "intent": acc.get("intent"),
+                "plan_id": acc.get("plan_id"),
+                "interrupted": interrupted,
+                "offline": acc.get("offline"),
+                "degradation_reason": acc.get("degradation_reason"),
+                "step_count": acc.get("step_count"),
+                "loop_blocked": acc.get("loop_blocked"),
+                "tool_count": len(acc.get("tool_calls", [])),
+            },
+        )
+        yield "message", {
+            "content": acc.get("response", ""),
+            "offline": acc.get("offline", True),
+            "degradation_reason": acc.get("degradation_reason"),
+            "step_count": acc.get("step_count"),
+            "loop_blocked": bool(acc.get("loop_blocked")),
+            "outcome": acc.get("outcome"),
+            "blocked_lines": acc.get("blocked_lines"),
+            "missing_params": acc.get("missing_params"),
+        }
+        yield "done", {
+            "interrupted": interrupted,
+            "plan_id": acc.get("plan_id"),
+            "outcome": acc.get("outcome"),
+            "step_count": acc.get("step_count"),
+            "loop_blocked": bool(acc.get("loop_blocked")),
+            "degradation_reason": acc.get("degradation_reason"),
+        }
+
+
+async def astream_turn(thread_id: str, actor_id: str, user_input: str):
+    """真流式执行一轮会话（新用户输入），逐节点产出 ``(event, data)`` 事件。
+
+    与 ``run_turn`` 语义一致（interrupted 判定、最终 state 字段相同），但通过
+    ``graph.astream`` 逐节点产出进度事件供 SSE 实时推送；事件序号由 API 层统一
+    分配并缓存，供断线续传（见 ``app.streaming``）。
+
+    事件：agent_start / tool_call / draft_created / interrupted / node_end /
+    message / done，并携带 ``degradation_reason`` / ``step_count`` / ``loop_blocked``
+    等可审计字段（不静默降级）。
+
+    V1 为离线优先确定性图，节点多为毫秒级同步计算，流式粒度为节点级；
+    token 级流式仅在真实 LLM 启用路径（node_classify 内 llm_parse_params）才有意义。
+    """
+    mode = _llm_mode()
+    startup_degradation = (
+        "LLM_MODE_OFFLINE" if mode == "offline" else (None if _llm_configured() else "LLM_NOT_CONFIGURED")
+    )
+    initial: AgentState = {
+        "thread_id": thread_id,
+        "actor_id": actor_id,
+        "user_input": user_input,
+        "tool_calls": [],
+        "rule_evidence": [],
+        # 每个新 turn 重置步数；tool_call_counts 跨 turn 累积（同一会话重复检测）
+        "step_count": 0,
+    }
+    async for item in _astream_graph(
+        thread_id=thread_id,
+        actor_id=actor_id,
+        graph_input=initial,
+        acc_init=initial,
+        trace_name="agent.turn",
+        trace_meta={"intent_source": "astream_turn"},
+        trace_input=user_input,
+        tags=["agent", "v1", "stream"],
+        startup_event=(
+            "agent_start",
+            {
+                "thread_id": thread_id,
+                "offline": not _llm_enabled(),
+                "llm_mode": mode,
+                "degradation_reason": startup_degradation,
+            },
+        ),
+    ):
+        yield item
+
+
+async def astream_resume(thread_id: str, plan_id: str, decision_version: int):
+    """流式恢复会话：读取数据库**已提交**的业务决定并解释结果。
+
+    只恢复对话流程（``Command(resume=...)``），**不执行审批、不创建采购单、不产生
+    任何业务副作用**（宪法第七条）；恢复键为 ``thread_id + plan_id + decision_version``。
+    """
+    payload = {
+        "status": _decision_status(plan_id),
+        "plan_id": plan_id,
+        "decision_version": decision_version,
+    }
+    async for item in _astream_graph(
+        thread_id=thread_id,
+        actor_id=None,
+        graph_input=Command(resume=payload),
+        acc_init=None,
+        trace_name="agent.resume",
+        trace_meta={"plan_id": plan_id, "decision_version": decision_version},
+        tags=["agent", "v1", "stream", "resume"],
+        startup_event=(
+            "agent_start",
+            {
+                "thread_id": thread_id,
+                "resume": True,
+                "plan_id": plan_id,
+                "decision_version": decision_version,
+            },
+        ),
+    ):
+        yield item
 
 
 def resume_workflow(thread_id: str, plan_id: str, decision_version: int) -> dict:

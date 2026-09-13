@@ -1,27 +1,25 @@
 """对话 API：SSE 流式对话（需求 8.2 / 架构 3）。
 
-SSE 事件：agent_start / tool_call / draft_created / interrupted / message / done / error。
+SSE 事件（真流式 + 断线续传）：agent_start / node_end / tool_call / draft_created /
+interrupted / message / done / error。每个事件带 ``id: turn_id:seq`` 序号行，
+客户端断线后携 ``Last-Event-ID`` 续传；续传只重放未收到的进度，不重新执行 Agent。
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.deps import RequestContext, get_context
 from app.db import get_session_factory
-from app.errors import ForbiddenError, NotFoundError, StockMindError
+from app.errors import ForbiddenError, NotFoundError, ValidationError
 from app.models.agent import Conversation, Message
 from app.services.access import require_roles
-
-logger = logging.getLogger("stockmind.api.conversations")
+from app.streaming import classify_last_event_id, sse_replay_frames, stream_agent_turn
 
 router = APIRouter(prefix="/api/v1", tags=["conversations"])
 
@@ -34,10 +32,6 @@ class CreateConversationRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str
-
-
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def _owned_conversation(session, thread_id: str, actor_id: str) -> Conversation:
@@ -87,53 +81,51 @@ async def send_message(
     thread_id: str,
     body: SendMessageRequest,
     ctx: Annotated[RequestContext, Depends(get_context)],
+    request: Request,
 ) -> StreamingResponse:
-    """SSE 流式执行一轮 Agent 对话。"""
+    """SSE 流式执行一轮 Agent 对话；支持 ``Last-Event-ID`` 断线续传。
+
+    正常路径：逐节点流式产出事件并写入缓冲；续传路径：重放缓冲中未收到的事件，
+    缓冲缺失时回退 checkpoint 读取最终态重放最小事件集。续传不重新执行 Agent，
+    避免重复 generate_draft 触发防重副作用（流式层幂等）。
+    """
     factory = get_session_factory()
     with factory() as session:
         require_roles(session, ctx.actor_id, "operator", "approver", "buyer", "admin")
+        _owned_conversation(session, thread_id, ctx.actor_id)  # 归属校验（含续传）
+
+    # 断线续传：客户端带 Last-Event-ID 重连，只重放已产生的事件（不重新执行 Agent）。
+    # 非法游标必须显式拒绝（稳定 422），不能静默当作新请求而重新执行一轮 Agent。
+    last_event_status, parsed = classify_last_event_id(request.headers.get("last-event-id"))
+    if last_event_status == "invalid":
+        raise ValidationError("Last-Event-ID 格式非法（应为 turn_id:seq，seq 为非负整数）")
+    if parsed is not None:
+        replay_turn_id, after_seq = parsed
+        return StreamingResponse(
+            sse_replay_frames(thread_id=thread_id, turn_id=replay_turn_id, after_seq=after_seq),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # 正常路径：记录用户消息后流式执行
+    turn_id = uuid.uuid4().hex
+    with factory() as session:
         conv = _owned_conversation(session, thread_id, ctx.actor_id)
         session.add(Message(conversation_id=conv.id, role="user", content=body.content))
         session.commit()
 
-    async def event_stream():
-        from app.observability import mark_error, set_request_id
-
-        # 通过 contextvar 把 request_id 关联到本轮观测 trace（run_turn 内部创建 trace）
-        set_request_id(ctx.request_id)
-        yield _sse("agent_start", {"thread_id": thread_id})
-        try:
-            from app.agent.graph import run_turn
-
-            # 同步图执行在事件循环外运行，避免阻塞（V1 离线模式耗时极短）
-            state, interrupted = await asyncio.to_thread(run_turn, thread_id, ctx.actor_id, body.content)
-            for call in state.get("tool_calls", []):
-                yield _sse("tool_call", call)
-            if state.get("draft_result") and state["draft_result"].get("created"):
-                yield _sse("draft_created", {"plan_id": state["draft_result"]["plan_id"]})
-            if interrupted:
-                yield _sse("interrupted", {"status": "pending_approval"})
-            yield _sse(
-                "message",
-                {
-                    "content": state.get("response", ""),
-                    "offline": state.get("offline", False),
-                    "outcome": state.get("outcome"),
-                    "blocked_lines": state.get("blocked_lines"),
-                    "missing_params": state.get("missing_params"),
-                },
-            )
-            yield _sse("done", {})
-        except StockMindError as exc:
-            mark_error(f"{exc.code}: {exc.message}")
-            yield _sse("error", {"code": exc.code, "message": exc.message})
-        except Exception as exc:  # noqa: BLE001
-            mark_error(f"{type(exc).__name__}: {exc}")
-            logger.exception("agent turn failed")
-            yield _sse("error", {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"})
-
     return StreamingResponse(
-        event_stream(),
+        stream_agent_turn(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            content=body.content,
+            actor_id=ctx.actor_id,
+            request_id=ctx.request_id,
+        ),
         media_type="text/event-stream",
-        headers={"X-Request-Id": ctx.request_id, "Cache-Control": "no-cache"},
+        headers={
+            "X-Request-Id": ctx.request_id,
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 关代理缓冲，保证实时推送
+        },
     )

@@ -103,6 +103,14 @@ Agent State 至少包含 `thread_id`、`actor_id`、原始请求摘要、结构�
 
 LLM 不可调用审批、创建采购单、下单、查询恢复、收货、关闭/取消、修改规则、定时任务配置和切换故障模式。所有工具调用都有输入长度限制、参数白名单、超时、错误码和工具审计。
 
+### 3.2 LLM 运行模式与降级（V1.1）
+
+`LLM_MODE` 三态：`auto`（默认）在 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` 三者齐备时优先真实 LLM，配置不完整或调用失败时回退 OFFLINE；`offline` 强制不调用外部模型；`llm` 用于评测真实模型路径，配置不完整时明确降级而不假装调用成功。降级原因是稳定 code（`LLM_MODE_OFFLINE` / `LLM_NOT_CONFIGURED` / `LLM_TIMEOUT` / `LLM_INVALID_RESPONSE` / `LLM_UNAVAILABLE`），写入 Agent 状态、SSE 事件、日志与评测报告，禁止静默降级。真实调用记录 input/output/total token（兼容 `usage_metadata` 与 `response_metadata.token_usage`），不记录密钥与完整敏感 Prompt；`LLM_PRICE_PER_1K_INPUT` / `LLM_PRICE_PER_1K_OUTPUT` 为假设单价，未配置时成本为 `null`（不写 0）。详见 ADR-007。
+
+### 3.3 Agent 失控防护（V1.1）
+
+节点统一守卫在进入时递增 `step_count`；超过 `AGENT_MAX_STEPS` 或已 `loop_blocked` 时**短路该节点的实际工作**（因此不会继续调用只读工具或 `generate_draft`），并路由到 `escalate` 终端节点，返回稳定业务语言“任务步骤超过安全上限，已停止自动处理，请转人工处理。”。工具重复检测以「工具名 + canonical JSON 参数」为 key 计数，同一会话中相同 key 超过 `AGENT_TOOL_DUPLICATE_LIMIT` 时写告警日志并转人工；不同参数不会被误判为重复。`step_count` 每个新 turn 重置，`tool_call_counts` 跨 turn 累积且由 checkpoint 保存（断线重连不丢失）。详见 ADR-007。
+
 ## 4. 领域模型与数据责任
 
 不在文档中承诺固定表数量，按领域定义实体：
@@ -264,11 +272,18 @@ V1 告警只在页面展示；邮件/企业微信、复杂重试策略和公网�
 
 FastAPI 提供 REST 和 SSE；React + TypeScript 提供补货助手、补货工作台、审批箱、采购单、定时任务、执行记录、规则知识库、操作人切换器八个页面。所有响应包含 request/trace id 和稳定错误码；状态变更响应还包含幂等操作 id 与最新对象版本。采购单页仅在 `po_created` 显示取消命令。
 
+SSE 对话为节点级真流式：`astream_turn` 经 LangGraph `astream` 逐节点产出进度事件，而非一次性 invoke 后拼装；事件带 `id: turn_id:seq` 序号并写入进程内缓冲（`app/streaming.py`，有容量上限的传输辅助层，非业务事实源）。客户端断线后携 `Last-Event-ID` 续传，只重放未收到的进度、不重新执行 Agent（避免重复 generate_draft 触发防重副作用）；缓冲缺失时回退 LangGraph checkpoint 读取最终态重放最小事件集。V1 为离线优先确定性图，流式粒度为节点级，token 级流式仅在真实 LLM 启用路径有意义。
+
+MCP Server（`app/mcp/server.py`，stdio transport，ADR-003，V1.1 能力）将只读工具（`list_warehouses` / `list_products` / `get_inventory` / `get_demand_history` / `get_supplier_options` / `search_rules`）封装为 MCP 协议，供外部 Agent 只读查询。写工具 `generate_draft` 与审批、下单、收货、取消等能力绝不暴露；MCP 客户端统一以固定 actor（环境变量 `MCP_ACTOR_ID`，默认为种子用户 `bob`）的只读角色执行，**角色校验先于查询**，成功、参数非法、权限失败与查询异常都写入审计（只记参数摘要与结果规模，不记结果全文）；`MCP_ACTOR_ID`必须是业务库中存在的用户 ID，不能填角色名 `operator`。输入边界（`days` / `top_k` 范围、id 与 query 长度、非空）同时体现在工具 Schema 与运行时校验。MCP 只做协议适配与能力发现，不扩大本地授权边界。
+
+HTTP Agent 主链路（`app/api/agent.py`，ADR-007，V1.1 能力）：`POST /api/v1/agent/start`（创建会话 + 持久化用户消息 + SSE 逐节点事件，响应头含 `X-Request-Id` / `X-Thread-Id`）、`POST /api/v1/agent/{thread_id}/resume`（澄清补充沿用同一 thread；审批恢复只读取数据库已提交决定并 `Command(resume=...)`，**不执行审批或任何业务副作用**，恢复键为 `thread_id + plan_id + decision_version`，计划不存在 404、版本不匹配 409）、`GET /api/v1/agent/{thread_id}/state`（安全状态摘要）。两个 SSE 入口（conversations 与 agent）共用 `app/streaming.py` 的事件缓冲、断线续传与补流实现。
+
 V1 通过 `X-Actor-Id` 查种子用户角色；请求体中的 `actor_id` 仅为旧客户端兼容字段，不能改变请求身份。创建会话以请求头身份为准，读取和发送消息必须校验 `thread_id` 归属，禁止跨演示用户访问会话。`system` 是 Celery 使用的内部服务主体，不能由浏览器提交 actor_id 冒充。管理员触发任务时，执行主体为 `system`，执行记录另存 `triggered_by_actor_id`。采购下达、未知订单查询、收货、关闭和取消在 API 与领域服务使用同一 `buyer/admin` 矩阵，审计记录真实 `actor_id`。V1.1 才增加 JWT/OAuth。浏览器验收必须走通：手动补货、多轮澄清、审批逐条排除、按供应商拆单、下单未知状态恢复、分批收货和重复收货拦截。
 
 ## 11. 可观测、测试与评测
 
 - Langfuse（可选，默认 no-op）：trace/span/generation、工具耗时、Token、成本；输入输出脱敏；未配置凭证时不初始化客户端、无网络请求，观测失败不影响业务；云端验证需真实凭证；
+- **Agent 决策链语义追踪（V1.1）**：每轮 trace 关联 request_id / thread_id / plan_id、**节点执行顺序**（图节点名 + `step_count`）、**工具名与参数摘要**、**结果规模与稳定错误码**、**RAG 引用的 `source_chunk_id` / `document_id`**、最终 `outcome`、`degradation_reason` 与 `loop_blocked`；不记录密钥、完整 Prompt、完整检索正文或敏感载荷；无命中时记录 `has_evidence=false`，不得虚构 citation；
 - 审计：操作者、动作、前后状态、对象、错误码和时间；不记密钥和完整 Prompt；
 - 测试：pytest、Hypothesis、Playwright、Ruff、Mypy、GitHub Actions（无密钥环境可运行）；pgvector 扩展由迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 保证（Compose/CI/裸机三场景可靠）；依赖以双锁文件精确约束（`requirements.lock` base+dev、`requirements-rag.lock` base+rag，torch 由 Dockerfile 官方 CPU 源固定 2.6.0+cpu 且零 CUDA 依赖）；CI 云端成功运行需 push 后由 Actions 执行（未提交则无云端记录）；
 - 评测：参数字段准确率、RAG Recall/MRR/引用正确率、任务完成率、工具调用正确率、必要澄清率、MAE/WAPE、P50/P95、Token/成本；按 OFFLINE 与真实 LLM 双模式分表报告，报告含样本量、并发度、机器、模型与运行时间戳；成本优先读取可配置单价，缺少单价只报告 Token；
@@ -306,6 +321,14 @@ SupervisorGraph
 V1 完整验收版已实现并运行验证（代码/迁移/测试/前端齐备；Docker 镜像 CPU-only PyTorch、Langfuse 可选观测、黄金集双模式评测、隔离全新部署验证均已实测）。仍不声称：完整 WMS、多租户、高并发、生产级认证或真实企业系统接入；对话在无 LLM Key 时运行离线演示模式，配置 Key 时使用真实模型（已实测 DeepSeek）；真实 LLM 评测结果非确定性，小样本延迟不构成容量结论；Langfuse 云端 trace 未验证（未配置凭证）；成本仅在有可配置单价时估算。
 
 ## 14. 修订记录
+
+- V4.11（2026-09-13）：发布前隔离验收补充——独立 Docker Compose 全新构建、迁移/种子初始化、关键后端回归和 9 条 Playwright 浏览器 E2E 全部通过并清理隔离环境；真实 MCP 宿主联调、真实 LLM 调用和真实账单成本仍未验证。
+
+- V4.10（2026-09-13）：V1.1 最终修订——①`Last-Event-ID` 三态（`absent`/`valid`/`invalid`），非法游标返回稳定 422，不得静默开启新任务；②`LLM_MODE` 白名单化（`auto`/`llm`/`offline`，空值按 auto，非法值配置加载即失败）；③新增 **Agent 决策链语义追踪**：节点执行顺序、工具名与参数摘要、结果规模与稳定错误码、RAG 引用的 chunk 文档 ID、降级原因、步数与门禁状态进入每轮 trace，且不记录密钥 / 完整 Prompt / 完整正文；④修复测试夹具健康度：conftest 显式导入全部 ORM 模型（此前 `Base.metadata` 依赖其他测试文件的 import 副作用，单独跑某组测试会静默建 0 张表并报 `relation "warehouse" does not exist`），并在重建 schema 后同步重置 app 连接池、为 DSN 补 `connect_timeout`。组件责任、状态机、确定性计算与 7 项安全不变量不变。验证边界：DB 集成测试本轮已执行；Docker 容器化与真实 MCP 宿主联调未执行。
+
+- V4.9（2026-09-13）：V1.1 扩展收口（安全边界与状态恢复）——①HTTP Agent 审批恢复增加计划与会话绑定校验（会话归属 / 计划存在 / 计划绑定本会话 / 决定版本一致 / 计划已决定 / checkpoint 处于等待恢复），失败路径不进入 LangGraph resume、不改变业务状态、不新建采购单；②SSE 断线续传按「缓冲无此 turn / 未完成 / 已完成」原子区分，`Last-Event-ID` 已指向 `done` 后不再补流且补流序号单调递增，越权 turn 返回稳定 `error` + `done`；③受控写工具 `generate_draft` 纳入与只读工具相同的重复调用门禁（超限不执行领域服务、不残留草稿/计划）；④MCP 默认 actor 更正为业务库真实用户 id `bob`，输入边界通过 `Annotated` + `Field` 进入客户端可见 `inputSchema`；⑤评测脚本 `MODE` 白名单化并强制设置 `LLM_MODE`。组件责任、状态机、确定性计算与 7 项安全不变量不变。验证边界：DB 集成测试本轮已执行；容器化部署与真实 MCP 宿主联调未执行。
+
+- V4.8（2026-09-13）：**V1.1 扩展能力（突破 V4.7 冻结）+ SSE 修复**——① SSE 流式修复与增强：伪流式（先 invoke 后拼装事件）改为节点级真流式（`app/agent/graph.py` 的 `_astream_graph` / `astream_turn` / `astream_resume` 经 LangGraph `astream` 逐节点产出），新增断线续传（`id: turn_id:seq` + 进程内事件缓冲 + `Last-Event-ID` 严格校验 + checkpoint 兜底；已重放到 `done` 不再追加兜底，兜底必发终止事件），`astream_turn` 与 `run_turn` 一样进入 `turn_trace` 并 `flush`；② `LLM_MODE` 三态（`auto`/`llm`/`offline`）与稳定降级原因（`LLM_NOT_CONFIGURED` / `LLM_TIMEOUT` / `LLM_INVALID_RESPONSE` / `LLM_UNAVAILABLE`），在状态、SSE 事件、日志与评测报告统一记录；③ HTTP Agent 主链路（`app/api/agent.py`：`agent/start`、`agent/{thread_id}/resume`、`agent/{thread_id}/state`），resume 只读已提交决定、不执行审批或下单；④ Agent 失控防护（节点守卫递增 `step_count` + `escalate` 转人工节点 + `tool_call_counts` 按 canonical JSON 参数去重，转人工后不调用任何工具）；⑤ 成本追踪（Token 记账 + `LLM_PRICE_PER_1K_*` 假设单价，未配置时成本为 `null`；报告含总成本 / 平均每任务成本 / 单价来源 / 是否假设单价 / 降级次数与原因分布）；⑥ MCP 只读 Server 强化（角色校验先于查询、成功与失败都审计、输入边界、拒绝 `system` 冒充）。新增 ADR-007；不改变领域规则、权限边界、状态机、数据库事实源与 7 项安全不变量。**验证边界如实标注**：本机未运行 PostgreSQL/Docker，`db` 标记测试与容器 E2E 未执行；未真实调用 LLM；成本为假设单价估算。
 
 - V4.7（2026-09-08）：V1 冻结。冻结组件责任、接口、状态机、数据模型、权限和演示流程；新增业务能力须进入 V1.1 或更高版本，安全、数据正确性、构建阻塞和文档勘误修复仍可进入冻结基线。
 

@@ -31,12 +31,30 @@ import httpx
 
 API_BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
 MODE = sys.argv[2] if len(sys.argv) > 2 else "offline"
-# OFFLINE 模式必须强制禁用 LLM：.env 可能含 LLM_API_KEY（本脚本会 source），
-# 若不清理，run_turn 会走真实 LLM，导致"offline 确定性"名不副实。
-if MODE != "llm":
+
+# MODE 只允许 offline / llm：其它取值立即失败，避免悄悄跑成某种混合模式。
+if MODE not in ("offline", "llm"):
+    print(f"ERROR: MODE 只能是 offline 或 llm，收到 {MODE!r}", file=sys.stderr)
+    sys.exit(2)
+
+if MODE == "offline":
+    # 强制离线：清空外部 LLM 凭证并显式设置 LLM_MODE=offline。
+    # （.env 会被本脚本 source，可能含 LLM_API_KEY；不清理会让 "OFFLINE 确定性" 名不副实。）
+    os.environ["LLM_MODE"] = "offline"
     os.environ["LLM_API_KEY"] = ""
     os.environ["LANGFUSE_PUBLIC_KEY"] = ""
     os.environ["LANGFUSE_SECRET_KEY"] = ""
+else:
+    # 评测真实模型路径：显式声明 llm 模式；缺少完整配置时由 Agent 记录
+    # LLM_NOT_CONFIGURED 并降级，绝不伪造"真实调用成功"。
+    os.environ["LLM_MODE"] = "llm"
+
+# 配置完整性：llm 模式下若缺任一配置，本次结果不代表真实模型
+LLM_CONFIGURED = bool(
+    (os.environ.get("LLM_API_KEY", "") or "").strip()
+    and (os.environ.get("LLM_BASE_URL", "") or "").strip()
+    and (os.environ.get("LLM_MODEL", "") or "").strip()
+)
 API = f"{API_BASE}/api/v1"
 EVAL_DIR = "evaluation"
 with open(os.path.join(EVAL_DIR, "golden_set.json"), encoding="utf-8") as f:
@@ -47,6 +65,8 @@ report = {
     "schema_version": GOLDEN["schema_version"],
     "api": API_BASE,
     "mode": MODE,
+    "llm_mode": os.environ.get("LLM_MODE", ""),
+    "llm_configured": LLM_CONFIGURED,
     "run_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     "host": platform.node(),
     "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
@@ -181,6 +201,8 @@ task_ok = 0
 tool_ok_calls = 0
 tool_total_calls = 0
 turn_latencies: list[float] = []
+degraded_turns = 0            # 真实降级次数（不含主动 offline 选择）
+degradation_reasons: dict = {}
 for case in GOLDEN["dialog_cases"]:
     thread = f"eval-{int(time.time()*1000)}-{task_total}"
     t0 = time.perf_counter()
@@ -200,6 +222,12 @@ for case in GOLDEN["dialog_cases"]:
     calls = state.get("tool_calls", [])
     tool_total_calls += len(calls)
     tool_ok_calls += sum(1 for c in calls if c.get("ok"))
+    # 降级原因必须显式统计（不允许静默降级）；LLM_MODE_OFFLINE 是主动选择，不计入降级
+    reason = state.get("degradation_reason")
+    if reason:
+        degradation_reasons[reason] = degradation_reasons.get(reason, 0) + 1
+        if reason != "LLM_MODE_OFFLINE":
+            degraded_turns += 1
 token_input, token_output, token_total = token_counts() if MODE == "llm" else (0, 0, 0)
 report["metrics"]["dialog_task_completion_rate"] = round(task_ok / task_total, 4)
 report["metrics"]["tool_call_correctness"] = (
@@ -208,31 +236,46 @@ report["metrics"]["tool_call_correctness"] = (
 report["metrics"]["dialog_sample_size"] = task_total
 report["metrics"]["dialog_mode"] = MODE
 report["metrics"]["dialog_offline_mode"] = MODE != "llm"
+report["metrics"]["degradation_count"] = degraded_turns
+report["metrics"]["degradation_rate"] = (
+    round(degraded_turns / task_total, 4) if task_total else None
+)
+report["metrics"]["degradation_reasons"] = degradation_reasons
 if turn_latencies:
     report["metrics"]["dialog_p50_latency_s"] = round(statistics.median(turn_latencies), 4)
     report["metrics"]["dialog_p95_latency_s"] = round(
         sorted(turn_latencies)[int(0.95 * len(turn_latencies)) - 1], 4
     )
-# Token 与成本：仅在真实 LLM 模式且配置单价时报告数值
+# Token 与成本：仅在真实 LLM 模式且配置单价时报告数值（未配置单价 -> null，绝不写 0）
 report["metrics"]["token_input_total"] = token_input if MODE == "llm" else None
 report["metrics"]["token_output_total"] = token_output if MODE == "llm" else None
 report["metrics"]["token_total"] = token_total if MODE == "llm" else None
-price_input = os.environ.get("LLM_PRICE_PER_1K_INPUT", "")
-price_output = os.environ.get("LLM_PRICE_PER_1K_OUTPUT", "")
-if MODE == "llm" and token_total and price_input and price_output:
-    try:
-        cost = (token_input / 1000) * float(price_input) + (token_output / 1000) * float(price_output)
-        report["metrics"]["cost_estimate_usd"] = round(cost, 6)
-        report["metrics"]["cost_price_source"] = "LLM_PRICE_PER_1K_*（可配置）"
-    except (ValueError, ZeroDivisionError):
-        report["metrics"]["cost_estimate_usd"] = None
-        report["metrics"]["cost_price_source"] = "价格解析失败，仅报告 Token"
-elif MODE == "llm":
-    report["metrics"]["cost_estimate_usd"] = None
-    report["metrics"]["cost_price_source"] = "未配置 LLM_PRICE_PER_1K_*，仅报告 Token"
+price_input = (os.environ.get("LLM_PRICE_PER_1K_INPUT", "") or "").strip()
+price_output = (os.environ.get("LLM_PRICE_PER_1K_OUTPUT", "") or "").strip()
+report["metrics"]["cost_total_usd"] = None
+report["metrics"]["cost_per_task_usd"] = None
+if MODE != "llm":
+    # OFFLINE 强制禁用 LLM：不产生 Token，也不得产生任何 LLM 成本
+    report["metrics"]["cost_price_source"] = "OFFLINE 模式不调用外部模型，不产生 LLM 成本"
+    report["metrics"]["cost_price_assumed"] = False
+elif not (price_input and price_output):
+    report["metrics"]["cost_price_source"] = "未配置 LLM_PRICE_PER_1K_INPUT/OUTPUT，仅报告 Token"
+    report["metrics"]["cost_price_assumed"] = False
+elif not token_total:
+    report["metrics"]["cost_price_source"] = "已配置单价但未采集到 Token，成本为 null"
+    report["metrics"]["cost_price_assumed"] = True
 else:
-    report["metrics"]["cost_estimate_usd"] = None
-    report["metrics"]["cost_price_source"] = "OFFLINE 模式不产生 LLM 成本"
+    try:
+        total_cost = (token_input / 1000) * float(price_input) + (token_output / 1000) * float(price_output)
+        report["metrics"]["cost_total_usd"] = round(total_cost, 8)
+        report["metrics"]["cost_per_task_usd"] = (
+            round(total_cost / task_total, 8) if task_total else None
+        )
+        report["metrics"]["cost_price_source"] = "LLM_PRICE_PER_1K_INPUT/OUTPUT（环境变量配置的假设单价）"
+        report["metrics"]["cost_price_assumed"] = True
+    except ValueError:
+        report["metrics"]["cost_price_source"] = "单价解析失败，成本为 null（仅报告 Token）"
+        report["metrics"]["cost_price_assumed"] = True
 
 # ---------- 5) 观测状态 ----------
 report["metrics"]["langfuse_trace"] = (
@@ -241,9 +284,20 @@ report["metrics"]["langfuse_trace"] = (
 report["corpus_fingerprint"] = corpus_fingerprint
 report["notes"] = [
     "合成种子数据；结果不代表真实经营收益。",
-    "延迟为单线程小样本（样本量见 *_sample_size），不构成容量结论。",
+    "延迟为单线程小样本（样本量见 *_sample_size），不构成容量结论，也不代表生产 QPS。",
     "真实 LLM 模式结果受模型/网络影响，非确定性；offline 模式确定性可复现。",
+    "成本按配置单价（LLM_PRICE_PER_1K_INPUT/OUTPUT）**假设单价**估算，不是供应商真实账单；"
+    "生产环境必须用真实账单校准；未配置单价时成本字段为 null（不写 0）。",
+    "OFFLINE 模式强制不调用外部模型：不产生 Token 与 LLM 成本；"
+    "degradation_reasons 中的 LLM_MODE_OFFLINE 是主动选择，不计入 degradation_count。",
 ]
+if MODE == "llm" and not LLM_CONFIGURED:
+    report["notes"].append(
+        "本次 MODE=llm 但 LLM 配置不完整：对话全部降级为 OFFLINE"
+        "（degradation_reasons 中可见 LLM_NOT_CONFIGURED），**不代表真实模型结果**。"
+    )
+if MODE == "offline":
+    report["notes"].append("本次 MODE=offline 已显式设置 LLM_MODE=offline，不产生任何外部模型调用。")
 
 os.makedirs(os.path.join(EVAL_DIR, "reports"), exist_ok=True)
 out_path = os.path.join(EVAL_DIR, "reports", f"eval_report_{MODE}.json")

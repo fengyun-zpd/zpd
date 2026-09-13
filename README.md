@@ -52,6 +52,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\demo_interview.ps1 -Isolated 
 docker compose -f docker-compose.iso.yml -p stockmind-interview down -v
 ```
 
+面试前可执行严格验收入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify_interview.ps1
+```
+
+该入口会重置隔离环境，运行关键后端回归和全部浏览器 E2E；任何关键测试或 E2E 出现 `skip` 都会失败。
+
 首次启动会在空数据库中初始化合成种子；API 重启不会清空已有业务数据。明确重置数据（一键销毁并重建合成种子）时：
 
 ```bash
@@ -67,8 +75,22 @@ docker compose down -v   # 连同数据卷一起清除
 
 ## 2. 使用 LLM 与 Embedding（可选）
 
-- 补货助手对话：在 `.env` 填写 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`。
-  留空时进入 **OFFLINE 演示模式**（确定性意图/参数提取，不调用外部模型，UI 会标注 offline）。
+- 补货助手对话由 `LLM_MODE` 控制（V1.1）：`auto`（默认）在 `LLM_BASE_URL` /
+  `LLM_API_KEY` / `LLM_MODEL` **三者齐备**时优先调用真实 LLM，缺配置或调用失败时自动回退
+  **OFFLINE**，并记录稳定降级原因（`LLM_NOT_CONFIGURED` / `LLM_TIMEOUT` /
+  `LLM_INVALID_RESPONSE` / `LLM_UNAVAILABLE`；UI、SSE 事件与评测报告都会标注，不静默降级）；
+  `offline` 强制不调用外部模型；`llm` 用于评测真实模型路径，配置不完整时明确降级，
+  不假装调用成功。
+- Agent 失控门禁（V1.1）：`AGENT_MAX_STEPS`（默认 10）超限即进入 `escalate` 转人工，
+  不再调用任何工具；同一会话中「同一工具 + 同一参数」超过 `AGENT_TOOL_DUPLICATE_LIMIT`
+  （默认 2）时停止后续工具调用并转人工（不同参数不会误判）。
+- HTTP Agent 主链路（V1.1）：`POST /api/v1/agent/start`、
+  `POST /api/v1/agent/{thread_id}/resume`、`GET /api/v1/agent/{thread_id}/state`；
+  resume 只读取数据库已提交决定，**不执行审批或下单**。
+- MCP 只读 Server（V1.1，ADR-003 / ADR-007）：`python -m app.mcp.server`（stdio）以固定
+  actor（`MCP_ACTOR_ID`，默认为种子用户 `bob`）暴露 6 个只读工具；写工具与审批/下单能力绝不暴露。`MCP_ACTOR_ID`必须是业务库中存在且具有只读角色的用户 ID，不能填角色名 `operator`。
+- LLM 成本单价（可选）：`LLM_PRICE_PER_1K_INPUT` / `LLM_PRICE_PER_1K_OUTPUT`（USD/1K tokens）。
+  这是**假设单价**；未配置时评测报告的成本字段为 `null`（不写 0），不是供应商真实账单。
 - RAG 向量检索：`EMBEDDING_MODEL_NAME` 默认为 `paraphrase-multilingual-MiniLM-L12-v2`，
   首次运行联网下载（api 容器已挂载 `huggingface-cache` 缓存卷，重建不重复下载）；
   生成向量索引：`docker compose exec api python -m app.seed.seed --with-embeddings`；
@@ -126,11 +148,13 @@ docker compose down -v   # 连同数据卷一起清除
 ```text
 backend/        FastAPI + SQLAlchemy + Celery + LangGraph + pgvector
   app/
-    api/         REST/SSE 路由、错误处理、请求上下文
+    api/         REST/SSE 路由（含 agent/start|resume|state 主链路）、错误处理、请求上下文
     models/      六域 ORM 模型（库存/补货/采购/Agent/知识库/治理）
     services/    确定性计算（预测/供应商/补货/哈希）+ 领域服务（计划/采购/幂等/审计/锁）
     rag/         Embedding、jieba+FTS、RRF 融合、规则解析
-    agent/       LangGraph 图、工具白名单、offline/LLM 双模式、interrupt/resume
+    agent/       LangGraph 图、工具白名单、LLM_MODE 三态与降级原因、步数/工具重复门禁、interrupt/resume
+    mcp/         MCP 只读工具 Server（stdio；6 个只读工具，写工具绝不注册）
+    streaming.py SSE 事件缓冲、断线续传与补流（agent 与 conversations 共用）
     tasks/       Celery：定时扫描、未知订单恢复、workflow_resume 触发
     seed/        固定种子合成数据（可一键重建）
     mock_supplier/ 模拟供应商 API（故障模式由 admin 切换）
@@ -192,11 +216,10 @@ docker compose -f docker-compose.iso.yml down
 重置种子与恢复故障模式全部指向 `18000/18100/13000`，不会影响主项目。健康检查与"等待 Beat 计划"使用
 带超时与明确报错的轮询（不依赖固定长时间 sleep）。
 
-**验证结果（2026-09-02 发布基线实测，本机 Windows PowerShell + WSL）**：
+**验证结果（2026-09-08 冻结基线实测，本机 Windows PowerShell + WSL）**：
 
-- 后端非 E2E 测试（unit/property/integration/agent，不含浏览器）：**136 passed, 8 deselected**
-  （V1 收口后：原 129 项 + 缺参澄清文案/预算不参与/全零计划建单拒绝/重复建单拒绝等 7 项新增）。
-- 隔离环境 E2E 测试（Playwright，独立 compose `docker-compose.iso.yml`，前端 :13000）：**8 passed**
+- 后端非 E2E 测试（unit/property/integration/agent，不含浏览器）：**150 passed, 1 skipped**；该 skip 是持久化演示库无可用 `po_created` 采购单时的保护性跳过，完整面试路径使用严格验收入口，不接受关键测试 skip。
+- 隔离环境 E2E 测试（Playwright，独立 compose `docker-compose.iso.yml`，前端 :13000）：**9 passed**；严格验收入口会把任何 E2E skip 视为失败。
   （闭环 助手→审批→建单→下达→分批收货→关闭、助手缺参/防重/模式徽标、数据页库存/供应商/告警/工作台详情）。
 - 安全不变量专项检查：越权操作、重复有效建议、重复采购、重复入库、`order_unknown` 盲目重试、非法状态迁移、幂等键异载荷副作用 **7 项全部为 0**。
 - 静态检查：Ruff、格式检查、Mypy 全部通过。
@@ -239,19 +262,28 @@ docker compose -f docker-compose.iso.yml down
 
 - 全部数据为固定随机种子生成的合成数据；不声称接入真实 WMS/ERP/供应商，
   不声称产生真实经营收益。
-- V1 只实现需求规格说明书 V4.5 的 V1 范围；V1.1/V2 能力标注为规划中/未实现。
-- 配置 LLM Key 时对话使用真实模型（已实测 DeepSeek）；无 Key 或调用失败时自动回退
-  OFFLINE 演示模式（UI 标注 offline）。无 Embedding 模型时向量召回不可用（如实告警），
+- V1 只实现需求规格说明书中标明的 V1 范围；V1.1/V2 能力单独标注，不并入 V1 验收结论。
+- V1.1 扩展能力（`LLM_MODE` 三态、HTTP Agent 主链路、步数/工具重复门禁、成本估算字段、
+  MCP 只读 Server）**突破 V1 冻结基线**，必须与 V1 验收结论分别陈述：
+  - 代码与单元/集成测试已实现；`ruff`、`py_compile`、前端 `tsc -b` 通过；
+  - **本轮已使用隔离 Docker Compose 环境验证 PostgreSQL、HTTP Agent 主链路与容器 E2E**：关键后端回归通过，
+    Playwright 浏览器 E2E 9 条全部通过；真实 MCP 宿主联调仍未执行，不得写成已验证；
+  - **未真实调用过 LLM**（无 Key）：`LLM_MODE` 判定、降级原因与错误分类由单元测试覆盖，
+    真实模型路径与真实 Token/成本**未实测**；
+  - 成本字段是按配置的**假设单价**估算，不是供应商真实账单；未配置单价时为 `null`。
+- 配置 LLM Key 且 `LLM_MODE=auto` 时对话优先使用真实模型；无 Key 或调用失败时回退 OFFLINE
+  并记录稳定降级原因（UI 标注 offline）。无 Embedding 模型时向量召回不可用（如实告警），
   关键词检索路径可正常降级。
 - 未实测指标不得外推为真实业务收益。
 
 ## 8. 文档索引
 
 - [V1 使用说明书（小白版）](StockMind使用说明书.md)
-- [需求规格说明书 V4.6](StockMind需求规格说明书.md)
-- [架构设计文档 V4.6](StockMind架构设计文档.md)
-- [ADR 001 修订版 1.7](StockMind架构决策记录ADR001.md)
-- [工作区 Agent 宪法 v1.5](AGENTS.md)
+- [需求规格说明书 V4.11](StockMind需求规格说明书.md)
+- [架构设计文档 V4.11](StockMind架构设计文档.md)
+- [ADR 001 修订版 1.12](StockMind架构决策记录ADR001.md)
+- [五分钟面试演示路径](docs/12_interview/demo-runbook.md)
+- [工作区 Agent 宪法 v1.9](AGENTS.md)
 
 ### 8.1 模块化演进区
 
@@ -265,7 +297,17 @@ docker compose -f docker-compose.iso.yml down
 
 ## 9. 修订记录
 
+- 2026-09-13：**发布前隔离验收补充**——使用 `scripts/verify_interview.ps1 -StopAfter` 完成独立 Compose 全新构建、迁移与种子初始化、健康检查、关键后端回归及 9 条 Playwright 浏览器 E2E，全部通过并清理隔离容器/卷；真实 MCP 宿主联调、真实 LLM 调用和基于真实账单的成本仍未验证。
+
+- 2026-09-13：**V1.1 最终修订**——①`Last-Event-ID` 三态（`absent`/`valid`/`invalid`）：非法游标返回稳定 422，不再静默开启新一轮任务；②`LLM_MODE` 白名单化（`auto`/`llm`/`offline`，空值按 auto，非法值配置加载即失败）；③新增 **Agent 决策链语义追踪**（节点执行顺序、工具名与参数摘要、结果规模与稳定错误码、RAG 引用的 chunk ID、降级原因、步数与门禁状态进入每轮 trace；不记录密钥 / 完整 Prompt / 完整正文，无命中不虚构 citation）；④修复测试夹具健康度：conftest 显式导入全部 ORM 模型并在重建 schema 后同步 app 连接池、DSN 补 `connect_timeout`，消除 `relation "warehouse" does not exist` 竞态。V1 冻结基线不变；MCP、HTTP Agent、SSE、`LLM_MODE`、门禁、成本与语义追踪均属 **V1.1 扩展**。验证边界：DB 集成测试本轮已执行；Docker 容器化与真实 MCP 宿主联调未执行；成本为假设单价估算。
+
+- 2026-09-13：**V1.1 扩展收口（安全边界与状态恢复正确性）**——①HTTP Agent 审批恢复增加计划与会话绑定校验（会话归属 / 计划存在 / 计划绑定本会话 / 决定版本一致 / 计划已产生可恢复决定 / checkpoint 处于等待恢复）；失败路径不进入 LangGraph resume、不改变计划状态、不新建采购单；②SSE 断线续传原子区分「缓冲无此 turn / 未完成 / 已完成」，`Last-Event-ID` 已指向 `done` 及其后不再补流，补流序号单调递增，越权 turn 返回稳定 `error` + `done`；③受控写工具 `generate_draft` 纳入与只读工具相同的重复调用门禁（超限不执行领域服务、不残留草稿/计划）；④MCP 默认 actor 由角色名 `operator` 更正为业务库真实用户 id `bob`，输入边界进入客户端可见 `inputSchema`；⑤评测脚本 `MODE` 只接受 `offline`/`llm` 并强制设置 `LLM_MODE`。V1 冻结基线不变；**MCP、HTTP Agent、SSE、`LLM_MODE`、门禁与成本统计均属 V1.1 扩展**。验证边界：DB 集成测试本轮已执行；容器化部署与真实 MCP 宿主联调未执行；成本为假设单价估算。
+
+- 2026-09-13：**V1.1 扩展能力（突破 V1 冻结）**——①`LLM_MODE` 三态（`auto`/`llm`/`offline`）与稳定降级原因（`LLM_NOT_CONFIGURED`/`LLM_TIMEOUT`/`LLM_INVALID_RESPONSE`/`LLM_UNAVAILABLE`），状态、SSE 事件、日志与评测报告统一记录，不静默降级；②HTTP Agent 主链路（`agent/start`、`agent/{thread_id}/resume`、`agent/{thread_id}/state`），resume 只读已提交决定、不执行审批或下单；③SSE 修复（`astream_turn` 进入 `turn_trace` 并 `flush`、`Last-Event-ID` 严格校验、已重放到 `done` 不再追加 checkpoint 兜底、兜底必发终止事件）；④Agent 失控门禁（`step_count` 递增 + `escalate` 转人工节点、`tool_call_counts` 按规范化参数去重、转人工后不调用写工具）；⑤成本追踪（Token 记账 + `LLM_PRICE_PER_1K_*` 假设单价，未配置时成本为 `null`；报告含总成本/平均每任务成本/单价来源/是否假设单价）；⑥MCP 只读边界强化（角色校验先于查询、成功与失败都审计、输入边界、拒绝 `system` 冒充）。新增 ADR-007 与测试（`tests/agent/test_agent_guard.py`、`tests/agent/test_llm_degradation.py`、`tests/api/test_agent_api.py`，并扩充 SSE/MCP 测试）。**验证边界如实**：本机未运行 PostgreSQL/Docker，`db` 测试与容器 E2E 未执行；未真实调用 LLM；成本为假设单价估算。
+
 - 2026-09-08：V1 冻结基线生效。冻结现有功能、权限、状态机、数据模型和演示流程；后续新增能力不得直接进入 V1，安全/正确性/构建阻塞修复仍可进入冻结基线。
+
+- 2026-09-08：面试交付收尾——README 同步冻结基线实测证据；新增 `scripts/verify_interview.ps1`，隔离环境中的关键后端测试和全部 E2E 出现 skip 直接失败；新增五分钟演示路径，覆盖缺参澄清、草稿、审批、`PLAN_STALE`、建单、`order_unknown` 恢复、收货与审计回放。
 
 - 2026-09-07：会话身份收紧——创建会话以 `X-Actor-Id` 为唯一事实源，拒绝请求体身份不一致；读取/发送消息校验 `thread_id` 归属，补上跨演示用户会话访问边界，并新增集成回归测试。
 

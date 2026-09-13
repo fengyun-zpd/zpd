@@ -70,14 +70,16 @@ def create_app() -> FastAPI:
             "docs": "/docs",
         }
 
-    # 延迟挂载对话路由，避免 Agent 依赖不可用时阻断应用启动
+    # 延迟挂载对话与 Agent 主链路路由，避免 Agent 依赖不可用时阻断应用启动
     try:
+        from app.api.agent import router as agent_router
         from app.api.conversations import router as conversations_router
 
         app.include_router(conversations_router)
+        app.include_router(agent_router)
         agent_available = True
     except ImportError:  # pragma: no cover
-        logger.warning("conversations router 未加载：Agent 模块尚不可用")
+        logger.warning("conversations/agent router 未加载：Agent 模块尚不可用")
 
     return app
 

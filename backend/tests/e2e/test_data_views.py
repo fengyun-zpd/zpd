@@ -86,6 +86,11 @@ def test_workbench_plan_detail(browser):
     try:
         page.goto(f"{BASE_URL}/", wait_until="networkidle")
         page.click("button:has-text('补货工作台')")
+        # 等待计划列表加载完成：否则点击后立即取按钮数会把"加载中"误判成"空态"（时序竞态）
+        page.wait_for_function(
+            "() => document.body.textContent.includes('查看详情') || document.body.textContent.includes('当前没有计划')",
+            timeout=15000,
+        )
         # 若存在计划，展开详情
         detail_btn = page.locator("button:has-text('查看详情')")
         if detail_btn.count() > 0:

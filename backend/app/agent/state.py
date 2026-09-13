@@ -25,3 +25,7 @@ class AgentState(TypedDict, total=False):
     outcome: str  # draft_created / blocked / duplicate / clarified / answered
     blocked_lines: list[dict]  # 每行：{product_id, blocked_code, blocked_reason, next_step}
     budget_note: bool  # 用户输入含预算/成本约束：V1 不参与计算，仅在回复中说明
+    degradation_reason: str | None  # LLM 未配置或失败时的可审计降级原因
+    step_count: int  # LangGraph 节点执行步数（含当前节点）
+    tool_call_counts: dict[str, int]  # 工具+规范化参数计数，防止同会话重复调用死循环
+    loop_blocked: bool  # 超步数或重复工具调用后转人工

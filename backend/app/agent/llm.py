@@ -1,6 +1,7 @@
 """可选 LLM 路径（OpenAI 兼容接口；V1 验证 DeepSeek）。
 
-仅当配置 LLM_API_KEY 时启用；失败自动回退离线模式。未配置 Key 时不调用外部服务。
+``LLM_MODE=auto`` 时优先调用真实模型，调用失败由 Agent 层回退离线模式并记录原因。
+未配置 Key 时不会发起外部请求；评测仍可显式使用 ``llm`` 模式验证真实路径。
 """
 
 from __future__ import annotations
@@ -15,8 +16,60 @@ from app.config import get_settings
 logger = logging.getLogger("stockmind.agent.llm")
 
 
+# ---------------------------------------------------------------- 稳定错误分类
+# 降级原因必须是稳定 code（供状态、SSE、日志与评测报告统一记录），不能用异常文本。
+
+
+class LLMError(RuntimeError):
+    """LLM 路径失败基类；``code`` 为稳定降级原因。"""
+
+    code = "LLM_UNAVAILABLE"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code:
+            self.code = code
+
+
+class LLMNotConfiguredError(LLMError):
+    """配置不完整（缺 Key / Base URL / Model）；不发起任何外部请求。"""
+
+    code = "LLM_NOT_CONFIGURED"
+
+
+class LLMTimeoutError(LLMError):
+    """调用超时。"""
+
+    code = "LLM_TIMEOUT"
+
+
+class LLMInvalidResponseError(LLMError):
+    """返回非 JSON 或 Schema 不匹配。"""
+
+    code = "LLM_INVALID_RESPONSE"
+
+
+class LLMUnavailableError(LLMError):
+    """网络 / HTTP / 鉴权等其它不可用情况。"""
+
+    code = "LLM_UNAVAILABLE"
+
+
+def classify_llm_error(exc: BaseException) -> LLMError:
+    """把底层异常映射为稳定的 LLM 错误类型（供 Agent 层记录降级原因）。"""
+    if isinstance(exc, LLMError):
+        return exc
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if isinstance(exc, TimeoutError) or "timeout" in name or "timed out" in text:
+        return LLMTimeoutError(str(exc)[:300])
+    return LLMUnavailableError(str(exc)[:300])
+
+
 def _chat(messages: list[dict], *, temperature: float = 0.0) -> str:
     settings = get_settings()
+    if not (settings.llm_api_key and settings.llm_base_url and settings.llm_model):
+        raise LLMNotConfiguredError("LLM 配置不完整（需要 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL）")
     from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
 
@@ -34,15 +87,18 @@ def _chat(messages: list[dict], *, temperature: float = 0.0) -> str:
         resp = llm.invoke(messages)
         text = str(resp.content)
         usage = getattr(resp, "usage_metadata", None) or {}
+        if not usage:
+            metadata = getattr(resp, "response_metadata", None) or {}
+            usage = metadata.get("token_usage") or metadata.get("usage") or {}
         record_generation(
             name="llm.chat",
             model=settings.llm_model,
             input_=messages,
             output=text,
             usage={
-                "input": usage.get("input_tokens"),
-                "output": usage.get("output_tokens"),
-                "total": usage.get("total_tokens"),
+                "input": usage.get("input_tokens", usage.get("prompt_tokens")),
+                "output": usage.get("output_tokens", usage.get("completion_tokens")),
+                "total": usage.get("total_tokens", usage.get("total")),
             },
             start_time=datetime.fromtimestamp(start, tz=timezone.utc),
             end_time=datetime.fromtimestamp(time.time(), tz=timezone.utc),
@@ -60,7 +116,7 @@ def _chat(messages: list[dict], *, temperature: float = 0.0) -> str:
             level="ERROR",
             status_message=str(exc)[:500],
         )
-        raise
+        raise classify_llm_error(exc) from exc
 
 
 def llm_parse_params(text: str) -> dict:
@@ -93,8 +149,8 @@ def llm_parse_params(text: str) -> dict:
     raw = _chat([{"role": "user", "content": prompt}])
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:  # noqa: BLE001
-        raise ValueError(f"LLM 返回非 JSON: {raw[:200]}") from exc
+    except json.JSONDecodeError as exc:
+        raise LLMInvalidResponseError(f"LLM 返回非 JSON: {raw[:200]}") from exc
     return {
         "intent": data.get("intent", "other"),
         "params": {

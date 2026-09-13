@@ -1,8 +1,8 @@
 # StockMind 智能仓储补货 Agent - 需求规格说明书
 
-> **版本**：V4.7
-> **修订日期**：2026-09-08
-> **状态**：V1 完整验收版（冻结基线）已实现并本机运行验证
+> **版本**：V4.8
+> **修订日期**：2026-09-13
+> **状态**：V1 完整验收版（冻结基线）已实现并本机运行验证；V1.1 扩展能力已实现（代码 + 测试），验证边界见修订记录
 > **首版范围**：V1 本机 Docker Compose 完整演示
 > **数据声明**：全部为固定随机种子生成的合成数据
 
@@ -261,7 +261,21 @@ received → closed
 
 ### 8.2 主要 API
 
-API 至少覆盖：会话流式对话、补货计划查询/审批、采购单创建/下达、供应商状态查询、分批收货/关闭、未下达采购单取消、定时任务配置/立即执行/重跑、执行记录/告警查询、规则只读查询、管理员知识资料导入和演示故障注入。所有请求返回 request/trace id，错误使用稳定错误码；状态变更请求还必须返回幂等操作标识和最新对象版本。
+API 至少覆盖：会话流式对话、补货计划查询/审批、采购单创建/下达、供应商状态查询、分批收货/关闭、未下达采购单取消、定时任务配置/立即执行/重跑、执行记录/告警查询、规则只读查询、管理员知识资料导入和演示故障注入。所有请求返回 request/trace id，错误使用稳定错误码；状态变更请求还必须返回幂等操作标识和最新对象版本。会话流式对话为节点级真流式，事件带递增序号；客户端断线后携 `Last-Event-ID` 续传，只重放未收到的进度、不重新执行 Agent（避免重复生成草稿触发防重），缓冲缺失时从 checkpoint 恢复最终态。断线续传的 `Last-Event-ID` 分三态：`absent`（无请求头 = 正常新请求）、`valid`（进入续传）、`invalid`（**返回稳定 422**）；非法游标不得静默开启新一轮任务，续传不得重新执行 Agent 或重复调用 `generate_draft`，补流事件序号必须单调递增。
+
+**V1.1 扩展 API（已实现，突破 V1 冻结基线）**：
+
+- `POST /api/v1/agent/start`：以自然语言启动一轮 Agent，创建会话、持久化用户消息，并以 SSE 逐节点返回事件（`agent_start` / `node_end` / `tool_call` / `draft_created` / `interrupted` / `message` / `error` / `done`）；响应头必须包含 `X-Request-Id` 与 `X-Thread-Id`；`agent_start` 必须包含 `thread_id`。
+- `POST /api/v1/agent/{thread_id}/resume`：澄清补充（`content`，同一会话继续且不新建 thread）或审批恢复（`plan_id` + `decision_version`）。审批恢复**只读取数据库已提交决定并恢复对话，不得执行审批、建单、下单或任何业务副作用**；恢复键严格为 `thread_id + plan_id + decision_version`，且必须**同时**满足：会话属于当前 actor（403）、`plan_id` 存在（404）、计划**绑定到当前 `thread_id`**（403，禁止跨会话恢复）、`decision_version` 与数据库当前版本一致（409）、计划已产生可恢复决定（`approved`/`rejected`/`superseded`，否则 409）、checkpoint 确实处于等待恢复（否则 409）。任一不满足都**不得进入** LangGraph resume、不得改变计划状态、不得新建采购单；两类参数同时提供或不提供均返回 422。
+- `GET /api/v1/agent/{thread_id}/state`：返回安全状态摘要（`thread_id` / `intent` / `missing_params` / `offline` / `degradation_reason` / `step_count` / `outcome` / `plan_id` / `needs_approval` / `response` / `loop_blocked`），不得返回密钥、完整 Prompt 或检索正文。
+
+**LLM 运行模式（V1.1）**：`LLM_MODE` 只允许 `auto` / `llm` / `offline`（容忍大小写与空白，空值按 `auto` 处理；其他取值在**配置加载时立即失败**）。`auto`（默认）在 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` 三者齐备时优先真实 LLM，配置不完整或调用失败时回退 OFFLINE；`offline` 强制不调用外部模型；`llm` 用于评测真实模型路径，配置不完整时必须明确降级，不得假装调用成功。降级原因必须是稳定 code（`LLM_MODE_OFFLINE` / `LLM_NOT_CONFIGURED` / `LLM_TIMEOUT` / `LLM_INVALID_RESPONSE` / `LLM_UNAVAILABLE`），并在状态、SSE 事件、日志与评测报告中记录，禁止静默降级。
+
+**Agent 失控防护（V1.1）**：每个节点执行递增 `step_count`，超过 `AGENT_MAX_STEPS` 必须进入 `escalate` 节点并返回稳定业务语言“任务步骤超过安全上限，已停止自动处理，请转人工处理。”，且不得继续调用只读工具或写工具；同一会话中「同一工具 + 同一规范化参数」超过 `AGENT_TOOL_DUPLICATE_LIMIT` 时必须写告警、置 `loop_blocked`、停止后续工具调用并转人工；不同参数不得被误判为重复；计数取自状态（checkpoint 保存），断线重连不得丢失。
+
+**成本（V1.1）**：真实 LLM 调用记录 input/output/total token（不记录密钥与完整敏感 Prompt）；`LLM_PRICE_PER_1K_INPUT` / `LLM_PRICE_PER_1K_OUTPUT` 为**假设单价**，未配置时成本字段为 `null`（不写 0）；评测报告输出总成本、平均每任务成本、单价来源与是否假设单价，并声明“不是供应商真实账单，生产环境需用真实账单校准”；OFFLINE 模式不得产生 LLM 成本。
+
+**Agent 决策链语义追踪（V1.1）**：每轮 trace 至少关联 `request_id`、`thread_id`、`plan_id`、节点执行顺序、选择的工具、工具参数摘要、工具结果规模与稳定错误码、RAG 引用的文档块 ID、最终 `outcome`、`degradation_reason`、`step_count`、`loop_blocked`；不得记录密钥、完整 Prompt、完整检索正文或敏感载荷；无检索命中时如实记录"无证据"，不得虚构 citation。
 
 ## 9. 前端验收
 
@@ -295,6 +309,14 @@ API 至少覆盖：会话流式对话、补货计划查询/审批、采购单创
 新项目远程仓库为 <https://github.com/fengyun-zpd/dianshang-shouhou>。后续售后工单插件应复用 V1 的审计、幂等、RAG 证据和人工审批原则，并新增订单核验、物流调查、退款草稿、地址变更和工单关闭等能力。多 Agent、MCP、Graphiti/Neo4j、模型微调和 Mule Agent Bridge 只有在对应 ADR、测试和评测完成后才能进入实现范围；本节不是 V1 验收承诺。
 
 ## 12. 修订记录
+
+- V4.11（2026-09-13）：发布前隔离验收补充——独立 Docker Compose 全新构建、迁移/种子初始化、关键后端回归和 9 条 Playwright 浏览器 E2E 全部通过并清理隔离环境；真实 MCP 宿主联调、真实 LLM 调用和真实账单成本仍未验证。
+
+- V4.10（2026-09-13）：**V1.1 最终修订**——①`Last-Event-ID` 分三态（`absent`/`valid`/`invalid`），非法游标返回稳定 422，不得静默开启新任务；②`LLM_MODE` 白名单化（`auto`/`llm`/`offline`，非法值配置加载即失败）；③新增 **Agent 决策链语义追踪**要求（节点顺序 / 工具摘要 / 结果规模 / RAG 引用 / 降级原因 / 步数 / 门禁状态，且不得虚构 citation）；④修复测试夹具：显式注册 ORM 模型并同步 app 连接池，消除 `relation "warehouse" does not exist` 的环境竞态。V1 冻结基线不变。**验证边界**：DB 集成测试本轮已执行；容器化与真实 MCP 宿主联调未执行；成本为假设单价估算。
+
+- V4.9（2026-09-13）：**V1.1 扩展收口（安全边界与状态恢复正确性）**——①审批恢复增加计划与会话绑定校验（会话归属 / 计划存在 / 计划绑定本会话 / 决定版本一致 / 计划已产生可恢复决定 / checkpoint 处于等待恢复），失败路径不进入 LangGraph resume、不改变计划状态、不新建采购单；②SSE 续传原子区分「缓冲无此 turn / 未完成 / 已完成」，`Last-Event-ID` 已指向 `done` 及其后不再补流，补流序号单调递增，越权 turn 返回稳定 `error` + `done`；③受控写工具 `generate_draft` 纳入与只读工具相同的重复调用门禁；④MCP 默认 actor 更正为业务库真实用户 id `bob`，输入边界进入客户端可见 `inputSchema`；⑤评测脚本 `MODE` 白名单化并强制设置 `LLM_MODE`。V1 冻结基线保持不变。**验证边界**：DB 集成测试本轮已执行；容器化部署与真实 MCP 宿主联调未执行；成本为假设单价估算。
+
+- V4.8（2026-09-13）：**V1.1 扩展需求（已实现代码 + 测试，突破 V1 冻结）**——新增 `LLM_MODE` 三态与稳定降级原因要求（禁止静默降级）、HTTP Agent 主链路三个端点（`agent/start`、`agent/{thread_id}/resume`、`agent/{thread_id}/state`，resume 只读已提交决定、不执行审批或下单）、Agent 失控防护（`step_count` 递增 + `escalate` 转人工、`tool_call_counts` 按规范化参数去重）、成本字段要求（假设单价、未配置为 `null`、报告须声明"不是供应商真实账单"）。对应 ADR-007。**验证边界如实标注**：本机未运行 PostgreSQL/Docker，`db` 标记测试与容器 E2E 未执行；未真实调用 LLM，真实模型路径与真实 Token/成本未实测；上述能力不得计入 V1 已验收范围。
 
 - V4.7（2026-09-08）：V1 冻结。现有功能、权限、状态机、数据模型和演示流程作为验收基线保持不变；新增业务需求必须进入 V1.1 或更高版本，安全、数据正确性、构建阻塞和文档勘误修复除外。
 

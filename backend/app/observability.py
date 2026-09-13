@@ -41,6 +41,18 @@ _token_output: int = 0
 _token_total: int = 0
 
 
+def cost_estimate() -> float | None:
+    """按配置单价估算当前累计 LLM 成本（USD）；未配置单价返回 None。"""
+    settings = get_settings()
+    if settings.llm_price_per_1k_input is None or settings.llm_price_per_1k_output is None:
+        return None
+    return round(
+        (_token_input / 1000) * settings.llm_price_per_1k_input
+        + (_token_output / 1000) * settings.llm_price_per_1k_output,
+        8,
+    )
+
+
 def token_counts() -> tuple[int, int, int]:
     """返回 (input, output, total) 累计 Token（本地评测采样用）。"""
     return _token_input, _token_output, _token_total

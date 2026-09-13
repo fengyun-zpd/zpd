@@ -29,6 +29,8 @@ dependencies = [
     "croniter>=2.0,<3",
     "sse-starlette>=2.1,<3",
     "httpx>=0.27,<1",
+    # MCP Server（只读工具协议适配，ADR-003）
+    "mcp>=1.0,<2",
 ]
 
 [project.optional-dependencies]
