@@ -92,9 +92,13 @@ $env:MCP_ACTOR_ID = "bob"     # 必须是业务库中真实存在的用户 id
 为安全 no-op（`tests/agent/test_semantic_trace.py` 用 fake trace 固定字段范围，不依赖云端）。
 另：断线续传的 `Last-Event-ID` 非法时返回 422，**不会静默开启新一轮任务**。
 
-**4）诚实边界（演示时必须说明）**：MCP Server 仅在自动化测试中验证过（SDK in-memory client），
-**未与真实 MCP 宿主（Claude Desktop 等）联调，也未做容器化部署验证**；成本字段是按配置
-**假设单价**估算，不是供应商真实账单。
+**4）诚实边界（演示时必须说明）**：MCP Server 已在隔离 Compose 中通过官方 Python SDK
+完成真实 stdio 握手、工具发现和一次只读调用，并不等同于已与 Claude Desktop 等真实桌面宿主
+联调；Redis SSE 已通过两个独立进程验证传输层续传，不等同于生产压测或完整崩溃演练。成本字段
+按配置**假设单价**估算，不是供应商真实账单。
+
+协议证据可单独复验：`scripts/verify_mcp_stdio.py` 验证 MCP，`scripts/verify_sse_redis.py`
+验证 Redis 跨进程续传；两者都不会重新执行 Agent 或触发业务写副作用。
 
 演示结束后可执行：
 

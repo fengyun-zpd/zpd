@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections import OrderedDict
+from typing import Any
 
 logger = logging.getLogger("stockmind.streaming")
 
@@ -150,11 +152,141 @@ class StreamBuffer:
             return ("complete" if log.done else "incomplete"), events
 
 
-_buffer = StreamBuffer()
+class RedisStreamBuffer:
+    """Redis 传输事件缓冲。
+
+    Redis 只保存短期 SSE 传输事件，不能替代业务表或 checkpoint。事件按 seq 存在
+    Hash 中，重复 append 使用同一 seq 覆盖，进程重启或多 API 进程切换后仍可续传。
+    Redis 不可用时由 :func:`_build_buffer` 回退到进程内 ``StreamBuffer``。
+    """
+
+    _INDEX_KEY = "stockmind:sse:index"
+
+    def __init__(self, client: Any, *, ttl_seconds: int = 3600, max_turns: int = 256, max_events: int = 512):
+        self._client = client
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._max_turns = max(1, int(max_turns))
+        self._max_events = max(1, int(max_events))
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _meta_key(turn_id: str) -> str:
+        return f"stockmind:sse:{turn_id}:meta"
+
+    @staticmethod
+    def _events_key(turn_id: str) -> str:
+        return f"stockmind:sse:{turn_id}:events"
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    def _trim_turn(self, turn_id: str) -> None:
+        events_key = self._events_key(turn_id)
+        fields = [self._text(field) for field in self._client.hkeys(events_key)]
+        if len(fields) <= self._max_events:
+            return
+        old = sorted(fields, key=lambda value: int(value))[: len(fields) - self._max_events]
+        if old:
+            self._client.hdel(events_key, *old)
+
+    def _trim_turns(self) -> None:
+        turn_ids = [self._text(value) for value in self._client.zrange(self._INDEX_KEY, 0, -1)]
+        excess = len(turn_ids) - self._max_turns
+        if excess <= 0:
+            return
+        for turn_id in turn_ids[:excess]:
+            self._client.delete(self._meta_key(turn_id), self._events_key(turn_id))
+            self._client.zrem(self._INDEX_KEY, turn_id)
+
+    def append(self, thread_id: str, turn_id: str, seq: int, event: str, data: dict) -> None:
+        with self._lock:
+            meta_key = self._meta_key(turn_id)
+            events_key = self._events_key(turn_id)
+            existing_thread = self._client.hget(meta_key, "thread_id")
+            if existing_thread is not None and self._text(existing_thread) != thread_id:
+                logger.warning("拒绝写入属于其他 thread 的 SSE turn: %s", turn_id)
+                return
+            done = self._client.hget(meta_key, "done")
+            done_value = "1" if event == "done" or self._text(done or "0") == "1" else "0"
+            self._client.hset(meta_key, mapping={"thread_id": thread_id, "done": done_value})
+            self._client.hset(
+                events_key,
+                str(seq),
+                json.dumps({"seq": seq, "event": event, "data": data}, ensure_ascii=False),
+            )
+            self._client.expire(meta_key, self._ttl_seconds)
+            self._client.expire(events_key, self._ttl_seconds)
+            self._client.zadd(self._INDEX_KEY, {turn_id: time.time()})
+            self._client.expire(self._INDEX_KEY, self._ttl_seconds)
+            self._trim_turn(turn_id)
+            self._trim_turns()
+
+    def read_turn(self, thread_id: str, turn_id: str, after_seq: int) -> tuple[str, list[tuple[int, str, dict]]]:
+        meta = self._client.hgetall(self._meta_key(turn_id))
+        if not meta:
+            return "missing", []
+        stored_thread = self._text(meta.get("thread_id", ""))
+        if stored_thread != thread_id:
+            return "foreign", []
+        events: list[tuple[int, str, dict]] = []
+        for raw in self._client.hvals(self._events_key(turn_id)):
+            try:
+                item = json.loads(self._text(raw))
+                seq = int(item["seq"])
+                if seq > after_seq:
+                    events.append((seq, str(item["event"]), dict(item.get("data") or {})))
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                logger.warning("忽略损坏的 Redis SSE 事件: %s", turn_id)
+        events.sort(key=lambda item: item[0])
+        done = self._text(meta.get("done", "0")) == "1"
+        return ("complete" if done else "incomplete"), events
+
+    def replay_after(self, thread_id: str, turn_id: str, after_seq: int) -> list[tuple[int, str, dict]] | None:
+        status, events = self.read_turn(thread_id, turn_id, after_seq)
+        return None if status in {"missing", "foreign"} else events
+
+    def is_complete(self, turn_id: str) -> bool:
+        value = self._client.hget(self._meta_key(turn_id), "done")
+        return self._text(value or "0") == "1"
 
 
-def get_buffer() -> StreamBuffer:
-    """返回进程内全局事件缓冲。"""
+_buffer: StreamBuffer | RedisStreamBuffer | None = None
+
+
+def _build_buffer() -> StreamBuffer | RedisStreamBuffer:
+    """按配置创建传输缓冲；Redis 不可用时安全回退内存。"""
+    from app.config import get_settings
+
+    settings = get_settings()
+    if settings.stream_event_backend.strip().lower() != "redis":
+        return StreamBuffer(max_turns=settings.stream_event_max_turns)
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
+        client.ping()
+        return RedisStreamBuffer(
+            client,
+            ttl_seconds=settings.stream_event_ttl_seconds,
+            max_turns=settings.stream_event_max_turns,
+            max_events=settings.stream_event_max_events,
+        )
+    except Exception as exc:  # noqa: BLE001 传输层不可用时不影响业务流
+        logger.warning("Redis SSE 事件后端不可用，回退进程内缓冲: %s", exc)
+        return StreamBuffer(max_turns=settings.stream_event_max_turns)
+
+
+def get_buffer() -> StreamBuffer | RedisStreamBuffer:
+    """返回配置的全局事件缓冲（内存或 Redis）。"""
+    global _buffer
+    if _buffer is None:
+        _buffer = _build_buffer()
     return _buffer
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app import streaming
-from app.streaming import StreamBuffer, classify_last_event_id, parse_last_event_id, sse_event
+from app.streaming import RedisStreamBuffer, StreamBuffer, classify_last_event_id, parse_last_event_id, sse_event
 
 
 def _events(frames: list[str]) -> list[str]:
@@ -266,3 +266,77 @@ def test_read_turn_reports_atomic_status():
     status, events = buf.read_turn("other-thread", "turn-1", 0)
     assert status == "foreign"
     assert events == []
+
+
+class _FakeRedis:
+    """覆盖 RedisStreamBuffer 所需命令的最小内存替身。"""
+
+    def __init__(self):
+        self.hashes: dict[str, dict[str, str]] = {}
+        self.sorted_sets: dict[str, dict[str, float]] = {}
+
+    def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
+
+    def hset(self, key, key_or_mapping=None, value=None, mapping=None):
+        target = self.hashes.setdefault(key, {})
+        if mapping is not None:
+            target.update({str(k): str(v) for k, v in mapping.items()})
+        elif key_or_mapping is not None:
+            target[str(key_or_mapping)] = str(value)
+
+    def hkeys(self, key):
+        return list(self.hashes.get(key, {}))
+
+    def hvals(self, key):
+        return list(self.hashes.get(key, {}).values())
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def hdel(self, key, *fields):
+        target = self.hashes.get(key, {})
+        for field in fields:
+            target.pop(str(field), None)
+
+    def expire(self, _key, _seconds):
+        return True
+
+    def zadd(self, key, mapping):
+        self.sorted_sets.setdefault(key, {}).update(mapping)
+
+    def zrange(self, key, start, stop):
+        values = sorted(self.sorted_sets.get(key, {}), key=lambda item: self.sorted_sets[key][item])
+        if stop == -1:
+            return values[start:]
+        return values[start : stop + 1]
+
+    def zrem(self, key, *members):
+        for member in members:
+            self.sorted_sets.get(key, {}).pop(member, None)
+
+    def delete(self, *keys):
+        for key in keys:
+            self.hashes.pop(key, None)
+
+
+def test_redis_buffer_survives_new_buffer_instance():
+    """Redis 后端重建对象后仍能读到完整 turn，模拟 API 进程重启。"""
+    client = _FakeRedis()
+    first = RedisStreamBuffer(client)
+    first.append("thread-1", "turn-1", 0, "agent_start", {})
+    first.append("thread-1", "turn-1", 1, "message", {"content": "hi"})
+    first.append("thread-1", "turn-1", 2, "done", {"recovered": False})
+
+    restarted = RedisStreamBuffer(client)
+    status, events = restarted.read_turn("thread-1", "turn-1", -1)
+    assert status == "complete"
+    assert [event for _, event, _ in events] == ["agent_start", "message", "done"]
+    assert restarted.replay_after("thread-1", "turn-1", 1)[-1][1] == "done"
+
+
+def test_redis_buffer_blocks_cross_thread_replay():
+    client = _FakeRedis()
+    buffer = RedisStreamBuffer(client)
+    buffer.append("alice-thread", "turn-1", 0, "message", {"content": "secret"})
+    assert buffer.read_turn("mallory-thread", "turn-1", 0) == ("foreign", [])

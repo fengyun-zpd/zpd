@@ -89,6 +89,8 @@ docker compose down -v   # 连同数据卷一起清除
   resume 只读取数据库已提交决定，**不执行审批或下单**。
 - MCP 只读 Server（V1.1，ADR-003 / ADR-007）：`python -m app.mcp.server`（stdio）以固定
   actor（`MCP_ACTOR_ID`，默认为种子用户 `bob`）暴露 6 个只读工具；写工具与审批/下单能力绝不暴露。`MCP_ACTOR_ID`必须是业务库中存在且具有只读角色的用户 ID，不能填角色名 `operator`。
+- SSE 传输缓冲（V1.1，ADR-008）：Compose 默认使用 Redis 保存短期事件（TTL/容量上限），Redis 不可用时安全回退内存；`Last-Event-ID` 续传不会重新执行 Agent。可用 `scripts/verify_sse_redis.py` 验证两个独立进程的事件恢复。
+- MCP 协议验收（V1.1）：`scripts/verify_mcp_stdio.py` 通过官方 Python SDK 执行 stdio 握手、六工具白名单和一次只读调用；该结果不代表已与 Claude Desktop 等真实宿主联调。
 - LLM 成本单价（可选）：`LLM_PRICE_PER_1K_INPUT` / `LLM_PRICE_PER_1K_OUTPUT`（USD/1K tokens）。
   这是**假设单价**；未配置时评测报告的成本字段为 `null`（不写 0），不是供应商真实账单。
 - RAG 向量检索：`EMBEDDING_MODEL_NAME` 默认为 `paraphrase-multilingual-MiniLM-L12-v2`，
@@ -154,7 +156,7 @@ backend/        FastAPI + SQLAlchemy + Celery + LangGraph + pgvector
     rag/         Embedding、jieba+FTS、RRF 融合、规则解析
     agent/       LangGraph 图、工具白名单、LLM_MODE 三态与降级原因、步数/工具重复门禁、interrupt/resume
     mcp/         MCP 只读工具 Server（stdio；6 个只读工具，写工具绝不注册）
-    streaming.py SSE 事件缓冲、断线续传与补流（agent 与 conversations 共用）
+    streaming.py SSE 事件缓冲、断线续传与补流（Redis/内存，agent 与 conversations 共用）
     tasks/       Celery：定时扫描、未知订单恢复、workflow_resume 触发
     seed/        固定种子合成数据（可一键重建）
     mock_supplier/ 模拟供应商 API（故障模式由 admin 切换）
@@ -185,7 +187,7 @@ mypy app
 cd frontend
 npm install && npm run build
 
-# 黄金集评测（可复现；RAG/对话指标走运行中的 API；MODE=offline|llm）
+# 黄金集评测（可复现；RAG/对话指标走运行中的 API；MODE=offline|llm；参数/对话各 10 例）
 cd backend && bash evaluation/run_eval.sh http://127.0.0.1:8000 offline
 cd backend && bash evaluation/run_eval.sh http://127.0.0.1:8000 llm   # 需 .env 配置 LLM_API_KEY
 # 报告输出到 backend/evaluation/reports/eval_report_{offline,llm}.json
@@ -279,11 +281,11 @@ docker compose -f docker-compose.iso.yml down
 ## 8. 文档索引
 
 - [V1 使用说明书（小白版）](StockMind使用说明书.md)
-- [需求规格说明书 V4.11](StockMind需求规格说明书.md)
-- [架构设计文档 V4.11](StockMind架构设计文档.md)
-- [ADR 001 修订版 1.12](StockMind架构决策记录ADR001.md)
+- [需求规格说明书 V4.12](StockMind需求规格说明书.md)
+- [架构设计文档 V4.12](StockMind架构设计文档.md)
+- [ADR 001 修订版 1.13](StockMind架构决策记录ADR001.md)
 - [五分钟面试演示路径](docs/12_interview/demo-runbook.md)
-- [工作区 Agent 宪法 v1.9](AGENTS.md)
+- [工作区 Agent 宪法 v2.0](AGENTS.md)
 
 ### 8.1 模块化演进区
 
@@ -298,6 +300,7 @@ docker compose -f docker-compose.iso.yml down
 ## 9. 修订记录
 
 - 2026-09-13：**发布前隔离验收补充**——使用 `scripts/verify_interview.ps1 -StopAfter` 完成独立 Compose 全新构建、迁移与种子初始化、健康检查、关键后端回归及 9 条 Playwright 浏览器 E2E，全部通过并清理隔离容器/卷；真实 MCP 宿主联调、真实 LLM 调用和基于真实账单的成本仍未验证。
+- 2026-09-13：**V1.1 传输与互操作补充**——Compose 默认启用 Redis 短期 SSE 事件缓冲并保留内存回退；新增官方 MCP Python SDK stdio 验证、Redis 两独立进程续传验证、黄金集 10+10 样本和 nearest-rank P95；新增 ADR-008 与面试证据包。真实 MCP 桌面宿主、真实 LLM、真实账单成本和生产压测仍未验证。
 
 - 2026-09-13：**V1.1 最终修订**——①`Last-Event-ID` 三态（`absent`/`valid`/`invalid`）：非法游标返回稳定 422，不再静默开启新一轮任务；②`LLM_MODE` 白名单化（`auto`/`llm`/`offline`，空值按 auto，非法值配置加载即失败）；③新增 **Agent 决策链语义追踪**（节点执行顺序、工具名与参数摘要、结果规模与稳定错误码、RAG 引用的 chunk ID、降级原因、步数与门禁状态进入每轮 trace；不记录密钥 / 完整 Prompt / 完整正文，无命中不虚构 citation）；④修复测试夹具健康度：conftest 显式导入全部 ORM 模型并在重建 schema 后同步 app 连接池、DSN 补 `connect_timeout`，消除 `relation "warehouse" does not exist` 竞态。V1 冻结基线不变；MCP、HTTP Agent、SSE、`LLM_MODE`、门禁、成本与语义追踪均属 **V1.1 扩展**。验证边界：DB 集成测试本轮已执行；Docker 容器化与真实 MCP 宿主联调未执行；成本为假设单价估算。
 

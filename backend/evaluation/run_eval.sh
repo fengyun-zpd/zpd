@@ -22,7 +22,6 @@ cd /mnt/d/workplace/PyCharmMiscProject/仓储/backend
 import json
 import os
 import platform
-import statistics
 import sys
 import time
 import urllib.parse
@@ -59,6 +58,15 @@ API = f"{API_BASE}/api/v1"
 EVAL_DIR = "evaluation"
 with open(os.path.join(EVAL_DIR, "golden_set.json"), encoding="utf-8") as f:
     GOLDEN = json.load(f)
+
+
+def percentile(values: list[float], quantile: float) -> float | None:
+    """使用 nearest-rank 计算小样本 P50/P95，避免 n=3 时索引落到 P33。"""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, min(len(ordered), int((quantile * len(ordered)) + 0.999999)))
+    return ordered[rank - 1]
 
 # ---------- 运行上下文 ----------
 report = {
@@ -146,10 +154,8 @@ report["metrics"]["rag_mrr"] = round(mrr_sum / n_rag, 4)
 report["metrics"]["rag_citation_correctness"] = round(cite_ok / cite_total, 4)
 report["metrics"]["rag_sample_size"] = n_rag
 if rag_latencies:
-    report["metrics"]["rag_p50_latency_s"] = round(statistics.median(rag_latencies), 4)
-    report["metrics"]["rag_p95_latency_s"] = round(
-        sorted(rag_latencies)[int(0.95 * len(rag_latencies)) - 1], 4
-    )
+    report["metrics"]["rag_p50_latency_s"] = round(percentile(rag_latencies, 0.5), 4)
+    report["metrics"]["rag_p95_latency_s"] = round(percentile(rag_latencies, 0.95), 4)
 
 # ---------- 3) 预测 MAE/WAPE（种子需求序列，确定性） ----------
 from sqlalchemy import select
@@ -242,10 +248,8 @@ report["metrics"]["degradation_rate"] = (
 )
 report["metrics"]["degradation_reasons"] = degradation_reasons
 if turn_latencies:
-    report["metrics"]["dialog_p50_latency_s"] = round(statistics.median(turn_latencies), 4)
-    report["metrics"]["dialog_p95_latency_s"] = round(
-        sorted(turn_latencies)[int(0.95 * len(turn_latencies)) - 1], 4
-    )
+    report["metrics"]["dialog_p50_latency_s"] = round(percentile(turn_latencies, 0.5), 4)
+    report["metrics"]["dialog_p95_latency_s"] = round(percentile(turn_latencies, 0.95), 4)
 # Token 与成本：仅在真实 LLM 模式且配置单价时报告数值（未配置单价 -> null，绝不写 0）
 report["metrics"]["token_input_total"] = token_input if MODE == "llm" else None
 report["metrics"]["token_output_total"] = token_output if MODE == "llm" else None

@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # LangGraph checkpoint 后端：postgres（生产/compose）或 memory（开发/测试）
     checkpointer_backend: str = "postgres"
 
+    # SSE 传输事件后端：memory（本地/测试）或 redis（compose/多进程）。
+    # 事件只用于断线续传，不替代业务数据库或 LangGraph checkpoint。
+    stream_event_backend: str = "memory"
+    stream_event_ttl_seconds: int = 3600
+    stream_event_max_turns: int = 256
+    stream_event_max_events: int = 512
+
     @field_validator("llm_mode")
     @classmethod
     def _validate_llm_mode(cls, value: str) -> str:

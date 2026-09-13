@@ -53,6 +53,7 @@ services:
     environment:
       POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
       REDIS_URL: redis://redis:6379/0
+      STREAM_EVENT_BACKEND: redis
       MOCK_SUPPLIER_URL: http://mock-supplier:8100
       EMBEDDING_MODEL_NAME: paraphrase-multilingual-MiniLM-L12-v2
       ORDER_TIMEOUT_SECONDS: "3"
@@ -78,6 +79,7 @@ services:
     environment:
       POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
       REDIS_URL: redis://redis:6379/0
+      STREAM_EVENT_BACKEND: redis
       MOCK_SUPPLIER_URL: http://mock-supplier:8100
       LLM_API_KEY: ""
     depends_on:
@@ -92,6 +94,7 @@ services:
     environment:
       POSTGRES_DSN: postgresql+psycopg://stockmind:stockmind@db:5432/stockmind
       REDIS_URL: redis://redis:6379/0
+      STREAM_EVENT_BACKEND: redis
       LLM_API_KEY: ""
     depends_on:
       db:

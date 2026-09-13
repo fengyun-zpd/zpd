@@ -4,7 +4,7 @@
 
 已接受（**V1.1 扩展**，部分实现）：MCP 只读工具 Server 在 **V1.1** 落地，**不属于 V1 冻结基线**（V1 冻结基线见 ADR 001 修订 1.8）；Mule Agent Bridge 仍为 V2/V3 规划，未实现。
 
-验证边界（如实）：代码与单元/集成测试已落地（`tests/unit/test_mcp_server.py`、`tests/integration/test_mcp_tools.py`）；**未完成容器化部署验证，也未与真实 MCP 宿主（Claude Desktop 等）联调**。
+验证边界（如实）：代码与单元/集成测试已落地（`tests/unit/test_mcp_server.py`、`tests/integration/test_mcp_tools.py`）；隔离 Compose 验收入口增加官方 Python SDK 的真实 stdio 握手、工具发现和只读调用验证；**仍未与真实桌面宿主（Claude Desktop 等）联调**。
 
 ## 决策
 

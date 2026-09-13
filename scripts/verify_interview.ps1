@@ -9,6 +9,8 @@ $demoScript = Join-Path $PSScriptRoot "demo_interview.ps1"
 $backendRoot = Join-Path $repoRoot "backend"
 $python = Join-Path $backendRoot ".venv\Scripts\python.exe"
 $e2eBaseUrl = "http://127.0.0.1:13000"
+$mcpVerification = Join-Path $repoRoot "scripts\verify_mcp_stdio.py"
+$sseVerification = Join-Path $repoRoot "scripts\verify_sse_redis.py"
 
 function Invoke-PytestStrict([string[]]$Arguments, [string]$Name) {
     $logPath = Join-Path ([System.IO.Path]::GetTempPath()) ("stockmind-{0}.log" -f ([guid]::NewGuid()))
@@ -45,7 +47,7 @@ if (-not (Test-Path $python)) {
     throw "Python venv not found at $python. Create backend/.venv before running the interview verification."
 }
 
-Write-Host "[1/4] Preparing a clean isolated demo stack..."
+Write-Host "[1/6] Preparing a clean isolated demo stack..."
 if ($NoBuild) {
     Write-Host "  -NoBuild is accepted for compatibility; the existing demo starter always verifies the current images."
 }
@@ -71,7 +73,37 @@ finally {
     Remove-Item Env:E2E_BASE_URL -ErrorAction SilentlyContinue
 }
 
-Write-Host "[3/4] Running the complete isolated browser flow (skip is an error)..."
+Write-Host "[3/6] Verifying MCP stdio protocol interoperability (skip is an error)..."
+if (-not (Test-Path $mcpVerification)) {
+    throw "MCP verification script not found at $mcpVerification."
+}
+$env:POSTGRES_DSN = "postgresql+psycopg://stockmind:stockmind@127.0.0.1:15432/stockmind"
+$env:REDIS_URL = "redis://127.0.0.1:16379/0"
+$env:CHECKPOINTER_BACKEND = "memory"
+$env:EMBEDDING_ENABLED = "false"
+try {
+    & $python $mcpVerification --actor-id bob --python $python
+    if ($LASTEXITCODE -ne 0) {
+        throw "MCP stdio verification failed with exit code $LASTEXITCODE."
+    }
+}
+finally {
+    Remove-Item Env:POSTGRES_DSN,Env:REDIS_URL,Env:CHECKPOINTER_BACKEND,Env:EMBEDDING_ENABLED -ErrorAction SilentlyContinue
+}
+
+Write-Host "[4/6] Verifying Redis SSE recovery across processes (skip is an error)..."
+$env:REDIS_URL = "redis://127.0.0.1:16379/0"
+try {
+    & $python $sseVerification
+    if ($LASTEXITCODE -ne 0) {
+        throw "Redis SSE verification failed with exit code $LASTEXITCODE."
+    }
+}
+finally {
+    Remove-Item Env:REDIS_URL -ErrorAction SilentlyContinue
+}
+
+Write-Host "[5/6] Running the complete isolated browser flow (skip is an error)..."
 $env:E2E_BASE_URL = $e2eBaseUrl
 try {
     Invoke-PytestStrict @("tests/", "-m", "e2e", "-q", "--disable-warnings") "Isolated browser E2E"
@@ -80,7 +112,7 @@ finally {
     Remove-Item Env:E2E_BASE_URL -ErrorAction SilentlyContinue
 }
 
-Write-Host "[4/4] Interview acceptance passed."
+Write-Host "[6/6] Interview acceptance passed."
 Write-Host "  Web:      $e2eBaseUrl"
 Write-Host "  API docs: http://127.0.0.1:18000/docs"
 Write-Host "  Supplier: http://127.0.0.1:18100/fault-modes"

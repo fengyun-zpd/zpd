@@ -79,6 +79,8 @@
 
 - v1.8 V1.1 扩展收口（2026-09-13）—— **不改变宪法条款**，仅登记收口修复与边界澄清：①HTTP Agent `resume` 增加计划与会话绑定校验（会话归属 + 计划存在 + 计划绑定本会话 + 决定版本一致 + 计划已产生可恢复决定 + checkpoint 确实处于等待恢复；恢复键严格为 `thread_id + plan_id + decision_version`），且只读已提交决定、不执行审批或任何副作用；②SSE 断线续传区分「缓冲中无此 turn / 未完成 / 已完成」，`Last-Event-ID` 已指向 `done` 及其后不再补流，补流序号单调递增，越权 turn 返回稳定 `error` + `done`；③受控写工具 `generate_draft` 纳入与只读工具相同的重复调用门禁（超限不执行领域服务、不残留草稿/计划、置 `loop_blocked` 转人工，计数随 checkpoint 保存）；④MCP 默认 actor 由角色名 `operator` 更正为业务库中真实用户 id `bob`，工具 `inputSchema` 暴露输入边界；⑤评测脚本 `MODE` 只接受 `offline`/`llm` 并强制设置 `LLM_MODE`。V1 冻结基线保持不变；MCP、HTTP Agent、SSE、`LLM_MODE`、Agent 门禁与成本统计均属 **V1.1 扩展**。**未验证项如实标注**：容器化部署与真实 MCP 宿主联调未执行；成本为假设单价估算。
 
+- v2.0 V1.1 传输与互操作补充（2026-09-13）—— **不改变宪法条款**：Compose 默认启用 Redis 短期 SSE 事件缓冲（TTL/容量上限，Redis 不可用回退内存）；官方 MCP Python SDK stdio 握手/工具发现和 Redis 两独立进程续传验证纳入严格验收入口；黄金集扩展为 10 个参数样本、10 个对话样本，P95 使用 nearest-rank；新增 ADR-008、面试证据包与验证脚本。真实 MCP 桌面宿主、真实 LLM 调用、真实账单成本和生产压测仍未验证。
+
 - v1.9 发布前隔离验收补充（2026-09-13）—— 独立 Docker Compose 全新构建、迁移/种子初始化、关键后端回归和 9 条 Playwright 浏览器 E2E 全部通过并清理隔离环境；真实 MCP 宿主联调、真实 LLM 调用和真实账单成本仍未验证。不改变宪法条款。
 
 - v1.7 MCP 只读 Server（2026-09-13）—— 将 StockMind 六个只读工具封装为 MCP Server（`app/mcp/server.py`，stdio transport），写工具 `generate_draft` 与审批/下单能力绝不暴露；身份固定为环境变量 `MCP_ACTOR_ID`（默认 operator），每次调用校验角色并写入审计；ADR-003 从“提议”升级为“已接受（部分实现）”。MCP Server 属 V1.1 能力（突破 V1 冻结，用户明确要求补齐技术触点），MCP 只做协议适配、不扩大本地授权边界（宪法第二十六条）；不改变领域规则、权限边界、状态机、数据库事实源与 7 项安全不变量。新增 `tests/unit/test_mcp_server.py`（白名单不变量，无 DB）与 `tests/integration/test_mcp_tools.py`（db）；依赖新增 `mcp>=1.0,<2`，uv.lock 已同步，本机已装 mcp==1.30.0 并通过白名单不变量与静态检查（ruff）。

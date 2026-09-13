@@ -65,10 +65,13 @@ bash backend/evaluation/run_eval.sh http://127.0.0.1:8000 llm
 
 ## 黄金集构成（schema `stockmind-eval-v1`）
 
-- `parameter_extraction`（7 例）：正常补货、缺参澄清、库外拒答、查询/解释意图。
+- `parameter_extraction`（10 例）：正常补货、缺参澄清、库外拒答、查询/解释意图。
 - `rag_queries`（5 例）：安全库存、仓库特殊规则、到货异常、供应商约束、提示注入拒绝。
 - `forecast_cases`（4 例）：算法选择、数据不足降级。
-- `dialog_cases`（3 例）：草稿中断、缺参澄清、查询意图。
+- `dialog_cases`（10 例）：草稿中断、缺参澄清、查询、解释、非业务输入和预算说明。
+
+`llm` 模式必须以报告中的 `llm_configured` 和 `dialog_mode` 判断是否真的调用模型；缺少 Key
+时的降级结果仅用于验证降级链路，不能写成真实 LLM 指标。
 
 安全不变量（越权/重复建议/重复采购/重复入库/未知状态盲目重试/非法迁移/幂等键异载荷）
 由 `.dev/closeout_invariants.sh` 专项检查，不在此报告内合并。

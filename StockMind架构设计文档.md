@@ -1,7 +1,7 @@
 # StockMind 架构设计文档
 
-> **版本**：V4.7
-> **修订日期**：2026-09-08
+> **版本**：V4.12
+> **修订日期**：2026-09-13
 > **状态**：V1 完整验收版（冻结基线）已实现并本机运行验证
 > **首版**：V1 本机 Docker Compose 完整闭环
 
@@ -272,7 +272,7 @@ V1 告警只在页面展示；邮件/企业微信、复杂重试策略和公网�
 
 FastAPI 提供 REST 和 SSE；React + TypeScript 提供补货助手、补货工作台、审批箱、采购单、定时任务、执行记录、规则知识库、操作人切换器八个页面。所有响应包含 request/trace id 和稳定错误码；状态变更响应还包含幂等操作 id 与最新对象版本。采购单页仅在 `po_created` 显示取消命令。
 
-SSE 对话为节点级真流式：`astream_turn` 经 LangGraph `astream` 逐节点产出进度事件，而非一次性 invoke 后拼装；事件带 `id: turn_id:seq` 序号并写入进程内缓冲（`app/streaming.py`，有容量上限的传输辅助层，非业务事实源）。客户端断线后携 `Last-Event-ID` 续传，只重放未收到的进度、不重新执行 Agent（避免重复 generate_draft 触发防重副作用）；缓冲缺失时回退 LangGraph checkpoint 读取最终态重放最小事件集。V1 为离线优先确定性图，流式粒度为节点级，token 级流式仅在真实 LLM 启用路径有意义。
+SSE 对话为节点级真流式：`astream_turn` 经 LangGraph `astream` 逐节点产出进度事件，而非一次性 invoke 后拼装；事件带 `id: turn_id:seq` 序号并写入 `app/streaming.py` 的短期缓冲。Compose 默认使用 Redis 共享传输事件（TTL/容量上限），Redis 不可用时回退进程内缓冲；两者都不是业务事实源。客户端断线后携 `Last-Event-ID` 续传，只重放未收到的进度、不重新执行 Agent（避免重复 `generate_draft` 触发防重副作用）；缓冲缺失或未完成时回退 LangGraph checkpoint 读取最终态重放最小事件集。V1 为离线优先确定性图，流式粒度为节点级，token 级流式仅在真实 LLM 启用路径有意义。跨进程 Redis 恢复由 `scripts/verify_sse_redis.py` 验证，不等同于生产压测或完整崩溃演练。
 
 MCP Server（`app/mcp/server.py`，stdio transport，ADR-003，V1.1 能力）将只读工具（`list_warehouses` / `list_products` / `get_inventory` / `get_demand_history` / `get_supplier_options` / `search_rules`）封装为 MCP 协议，供外部 Agent 只读查询。写工具 `generate_draft` 与审批、下单、收货、取消等能力绝不暴露；MCP 客户端统一以固定 actor（环境变量 `MCP_ACTOR_ID`，默认为种子用户 `bob`）的只读角色执行，**角色校验先于查询**，成功、参数非法、权限失败与查询异常都写入审计（只记参数摘要与结果规模，不记结果全文）；`MCP_ACTOR_ID`必须是业务库中存在的用户 ID，不能填角色名 `operator`。输入边界（`days` / `top_k` 范围、id 与 query 长度、非空）同时体现在工具 Schema 与运行时校验。MCP 只做协议适配与能力发现，不扩大本地授权边界。
 
@@ -285,7 +285,7 @@ V1 通过 `X-Actor-Id` 查种子用户角色；请求体中的 `actor_id` 仅为
 - Langfuse（可选，默认 no-op）：trace/span/generation、工具耗时、Token、成本；输入输出脱敏；未配置凭证时不初始化客户端、无网络请求，观测失败不影响业务；云端验证需真实凭证；
 - **Agent 决策链语义追踪（V1.1）**：每轮 trace 关联 request_id / thread_id / plan_id、**节点执行顺序**（图节点名 + `step_count`）、**工具名与参数摘要**、**结果规模与稳定错误码**、**RAG 引用的 `source_chunk_id` / `document_id`**、最终 `outcome`、`degradation_reason` 与 `loop_blocked`；不记录密钥、完整 Prompt、完整检索正文或敏感载荷；无命中时记录 `has_evidence=false`，不得虚构 citation；
 - 审计：操作者、动作、前后状态、对象、错误码和时间；不记密钥和完整 Prompt；
-- 测试：pytest、Hypothesis、Playwright、Ruff、Mypy、GitHub Actions（无密钥环境可运行）；pgvector 扩展由迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 保证（Compose/CI/裸机三场景可靠）；依赖以双锁文件精确约束（`requirements.lock` base+dev、`requirements-rag.lock` base+rag，torch 由 Dockerfile 官方 CPU 源固定 2.6.0+cpu 且零 CUDA 依赖）；CI 云端成功运行需 push 后由 Actions 执行（未提交则无云端记录）；
+- 测试：pytest、Hypothesis、Playwright、Ruff、Mypy、GitHub Actions（无密钥环境可运行）；pgvector 扩展由迁移内 `CREATE EXTENSION IF NOT EXISTS vector` 保证（Compose/CI/裸机三场景可靠）；依赖以双锁文件精确约束（`requirements.lock` base+dev、`requirements-rag.lock` base+rag，torch 由 Dockerfile 官方 CPU 源固定 2.6.0+cpu 且零 CUDA 依赖）；MCP 协议由官方 Python SDK stdio 脚本验证，Redis SSE 传输由两个独立进程脚本验证；CI 云端成功运行需 push 后由 Actions 执行（未提交则无云端记录）；
 - 评测：参数字段准确率、RAG Recall/MRR/引用正确率、任务完成率、工具调用正确率、必要澄清率、MAE/WAPE、P50/P95、Token/成本；按 OFFLINE 与真实 LLM 双模式分表报告，报告含样本量、并发度、机器、模型与运行时间戳；成本优先读取可配置单价，缺少单价只报告 Token；
 - 安全不变量：越权操作、重复有效建议、重复采购、重复入库、未知状态盲目重试、非法状态迁移、幂等键异载荷副作用必须为 0；
 - 评测集固定随机种子，报告保存用例哈希和语料指纹；

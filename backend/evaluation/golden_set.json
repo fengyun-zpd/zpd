@@ -8,7 +8,10 @@
     {"input": "帮我补货", "expected": {"clarify": true}},
     {"input": "明天天气怎么样", "expected": {"intent": "other"}},
     {"input": "华东仓 SKU-E01 库存多少", "expected": {"intent": "query"}},
-    {"input": "为什么推荐补货 100 件", "expected": {"intent": "explain"}}
+    {"input": "为什么推荐补货 100 件", "expected": {"intent": "explain"}},
+    {"input": "华南仓 SKU-E09 未来30天补货", "expected": {"warehouse_id": "WH-S", "requested_window": 30, "products_any_of": ["SKU-E09"]}},
+    {"input": "广州仓 SKU-E10 一周采购", "expected": {"warehouse_id": "WH-S", "requested_window": 7, "products_any_of": ["SKU-E10"]}},
+    {"input": "华东仓 SKU-E02 14天进货", "expected": {"warehouse_id": "WH-E", "requested_window": 14, "products_any_of": ["SKU-E02"]}}
   ],
   "rag_queries": [
     {"query": "安全库存规则", "relevant_docs": ["doc-ss-01"], "reject_docs": ["doc-inj-01", "doc-forge-01"]},
@@ -26,6 +29,12 @@
   "dialog_cases": [
     {"input": "帮我检查华东仓未来两周需要补货的紧固件", "expect": {"interrupted": true}},
     {"input": "帮我补货", "expect": {"clarify": true}},
-    {"input": "华东仓 SKU-E01 库存多少", "expect": {"intent": "query"}}
+    {"input": "华东仓 SKU-E01 库存多少", "expect": {"intent": "query"}},
+    {"input": "华南仓库存多少", "expect": {"intent": "query"}},
+    {"input": "华东仓最近需求历史如何", "expect": {"intent": "query"}},
+    {"input": "为什么建议安全库存", "expect": {"intent": "explain"}},
+    {"input": "明天北京天气怎样", "expect": {"intent": "other"}},
+    {"input": "帮我查华南仓在途库存", "expect": {"intent": "query"}},
+    {"input": "帮我补货，预算一万元", "expect": {"clarify": true}}
   ]
 }
